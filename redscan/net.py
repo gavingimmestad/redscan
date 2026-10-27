@@ -344,16 +344,20 @@ def parse_ports(spec: str) -> list[int]:
 
 
 def guess_os(ttl: int | None) -> str:
-    """Crude OS hint from the reply TTL - fun, not forensics."""
+    """Crude OS hint from the reply TTL - fun, not forensics.
+
+    Hosts start a packet at 64, 128 or 255 and every router knocks one off, so
+    the nearest starting value above the TTL we saw gives both a family guess
+    and a hop count.
+    """
     if ttl is None:
         return "unknown"
-    if ttl > 200:
-        return "Cisco / network gear"
-    if ttl > 100:
-        return "Windows (TTL 128)"
-    if ttl > 50:
-        return "Linux / Unix (TTL 64)"
-    return "many hops away"
+    for initial, family in ((64, "Linux / Unix"), (128, "Windows"),
+                            (255, "network gear")):
+        if ttl <= initial:
+            hops = initial - ttl
+            return f"{family}, ~{hops} hop{'' if hops == 1 else 's'} away"
+    return "unknown"
 
 
 def local_ip() -> str:
