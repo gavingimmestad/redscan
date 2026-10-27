@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import struct
+import zlib
 from pathlib import Path
 
 SIZES = (16, 24, 32, 48, 64, 128, 256)
@@ -69,7 +70,10 @@ def _sample(x: float, y: float) -> tuple[int, int, int, int]:
         by = blip_r * math.sin(math.radians(blip_deg - 90.0))
         distance = math.hypot(x - bx, y - by)
         if distance < 0.055:
-            colour = _mix(colour, GLOW, (1.0 - distance / 0.055) ** 0.7)
+            # Ember at the edge, white-hot in the middle.
+            intensity = 1.0 - distance / 0.055
+            colour = _mix(colour, _mix(EMBER, GLOW, intensity ** 2),
+                          intensity ** 0.7)
 
     # Bright rim and hot centre.
     if radius > 0.90:
@@ -157,8 +161,30 @@ def write_ico(path: Path, images: list[list[list[tuple[int, int, int, int]]]]) -
     path.write_bytes(bytes(out))
 
 
+def _chunk(tag: bytes, payload: bytes) -> bytes:
+    body = tag + payload
+    return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
+
+
+def write_png(path: Path, image: list[list[tuple[int, int, int, int]]]) -> None:
+    """8-bit RGBA PNG, for the README and for eyeballing the render."""
+    size = len(image)
+    raw = bytearray()
+    for row in image:
+        raw.append(0)  # filter type 0 (none) per scanline
+        for r, g, b, a in row:
+            raw += bytes((r, g, b, a))
+    png = b"\x89PNG\r\n\x1a\n"
+    png += _chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+    png += _chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+    png += _chunk(b"IEND", b"")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(png)
+
+
 def main() -> None:
-    target = Path(__file__).resolve().parent.parent / "assets" / "redscan.ico"
+    assets = Path(__file__).resolve().parent.parent / "assets"
+    target = assets / "redscan.ico"
     print(f"rendering {MASTER}x{MASTER} master...")
     master = render_master()
     images = []
@@ -167,6 +193,10 @@ def main() -> None:
         images.append(downsample(master, size))
     write_ico(target, images)
     print(f"wrote {target} ({target.stat().st_size:,} bytes, {len(SIZES)} sizes)")
+
+    preview = assets / "redscan.png"
+    write_png(preview, images[SIZES.index(256)])
+    print(f"wrote {preview} ({preview.stat().st_size:,} bytes, 256x256)")
 
 
 if __name__ == "__main__":

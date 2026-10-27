@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/redscan.png" alt="RedScan" width="128" height="128">
+</p>
+
 <h1 align="center">RedScan</h1>
 
 <p align="center">
