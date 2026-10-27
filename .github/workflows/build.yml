@@ -1,0 +1,39 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Smoke test
+        run: python run_redscan.py 127.0.0.1 -p 135,445 --no-anim
+
+      - name: Build executable
+        run: ./build.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RedScan-windows
+          path: dist/RedScan.exe
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/RedScan.exe
