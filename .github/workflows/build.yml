@@ -3,9 +3,8 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
-  release:
-    types: [published]
   workflow_dispatch:
 
 jobs:
@@ -14,28 +13,36 @@ jobs:
     permissions:
       contents: write        # needed to attach the exe to a release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
-      - name: Smoke test
+      - name: Smoke test (source)
         run: python run_redscan.py 127.0.0.1 -p 135,445 --no-anim
 
       - name: Build executable
         run: ./build.ps1
 
-      - uses: actions/upload-artifact@v4
+      - name: Smoke test (exe)
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true  # fail on any non-zero exit, not just the last
+          ./dist/redscan.exe --version
+          ./dist/redscan.exe 127.0.0.1 -p 135,445 --no-anim
+          ./dist/redscan.exe 127.0.0.1 --ping-only -c 2 -i 0.2 --no-anim
+
+      - uses: actions/upload-artifact@v7
         with:
-          name: RedScan-windows
-          path: dist/RedScan.exe
+          name: redscan-windows
+          path: dist/redscan.exe
 
       - name: Attach to release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
         with:
-          files: dist/RedScan.exe
+          files: dist/redscan.exe
+          fail_on_unmatched_files: true
