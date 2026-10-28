@@ -62,8 +62,14 @@ def build_console() -> Console:
         try:
             import ctypes
 
-            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
-            ctypes.windll.kernel32.SetConsoleCP(65001)
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleOutputCP(65001)
+            kernel32.SetConsoleCP(65001)
+            # Classic conhost starts with VT off, which drops Rich to 16 colours.
+            handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            mode = ctypes.c_uint32()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # VT processing
         except Exception:  # pragma: no cover - cosmetic only
             pass
         for stream in (sys.stdout, sys.stderr):
