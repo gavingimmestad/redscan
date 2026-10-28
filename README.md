@@ -16,6 +16,15 @@
   <img alt="license" src="https://img.shields.io/badge/license-MIT-8B0000?style=for-the-badge&labelColor=2B0509">
 </p>
 
+<p align="center">
+  <a href="https://github.com/gavingimmestad/redscan/releases/latest/download/redscan.exe"><strong>⬇ Download redscan.exe for Windows</strong></a>
+  &nbsp;·&nbsp; <a href="https://github.com/gavingimmestad/redscan/releases/latest">all releases</a>
+</p>
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="RedScan sweeping all 65,535 ports with the live dashboard" width="760">
+</p>
+
 ```
 ██████╗ ███████╗██████╗ ███████╗ ██████╗ █████╗ ███╗   ██╗
 ██╔══██╗██╔════╝██╔══██╗██╔════╝██╔════╝██╔══██╗████╗  ██║
@@ -53,8 +62,17 @@ live in a single shade of angry red.
 
 ### Grab the executable
 
-Download `RedScan.exe` from the [latest release](../../releases/latest) and run
-it. No Python, no dependencies, nothing to install.
+Download [`redscan.exe`](https://github.com/gavingimmestad/redscan/releases/latest/download/redscan.exe)
+from the [latest release](https://github.com/gavingimmestad/redscan/releases/latest)
+and run it. It is a single self-contained file: no Python, no dependencies,
+nothing to install.
+
+- **Double-click it** for the interactive menu.
+- **Or run it from a terminal** in the download folder:
+  `.\redscan.exe 192.168.1.1` (every command under [Usage](#usage) works the same way).
+
+The exe is not code-signed, so the first launch may show a Windows SmartScreen
+prompt: choose *More info* → *Run anyway*.
 
 ### Run from source
 
@@ -66,6 +84,9 @@ python -m redscan
 ```
 
 ## Usage
+
+The examples call it `redscan`; with the downloaded exe that is `.\redscan.exe`,
+and from source it is `python -m redscan`.
 
 ```bash
 redscan                             # interactive menu
@@ -113,12 +134,26 @@ python tools/make_icon.py      # regenerate the radar icon (optional)
 ./build.ps1
 ```
 
-The one-file binary lands in `dist/RedScan.exe`, icon and all. On Linux or macOS:
+The one-file binary lands in `dist/redscan.exe`, with the radar icon and a
+Windows version resource read from `redscan/__init__.py`. `build.ps1` runs under
+both Windows PowerShell 5.1 and PowerShell 7. On Linux or macOS:
 
 ```bash
 pip install -r requirements-dev.txt
-pyinstaller --onefile --name RedScan --console run_redscan.py
+pyinstaller --onefile --name redscan --console --collect-all rich run_redscan.py
 ```
+
+### Releases
+
+GitHub Actions builds and smoke-tests the exe on every push. Pushing a version
+tag publishes it:
+
+```bash
+git tag v1.0.1 && git push origin v1.0.1
+```
+
+The workflow builds `redscan.exe` on Windows, runs it against `127.0.0.1`, and
+attaches it to a GitHub release for that tag.
 
 ## Layout
 
@@ -133,7 +168,8 @@ redscan/
 ├── tools/
 │   └── make_icon.py renders assets/redscan.ico with no image libraries
 ├── run_redscan.py   PyInstaller entry point
-└── build.ps1        one-file Windows build
+├── build.ps1        one-file Windows build
+└── .github/workflows/build.yml   CI build, v* tags publish a release
 ```
 
 ## Scan only what you are allowed to scan
