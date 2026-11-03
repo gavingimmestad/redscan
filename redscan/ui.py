@@ -1,4 +1,11 @@
-"""Everything that puts red pixels on the terminal."""
+"""Everything that puts coloured pixels on the terminal.
+
+Nothing in here names a colour. Every style either comes from the Rich theme
+(``rs.*``) or is asked for by palette role, so the whole dashboard follows
+whatever palette is loaded. Under a psychedelic palette the borders breathe,
+the headings flow and the coverage strip is washed by a plasma field; under red
+it all sits still, exactly as it did in 1.0.
+"""
 
 from __future__ import annotations
 
@@ -27,10 +34,62 @@ from rich.text import Text
 
 from .banner import sweep_bar
 from .net import PingStats, Pong, PortResult, Target, guess_os
-from .theme import BLOOD, CRIMSON, EMBER, FLARE, GLOW, RED, gradient_text, ramp_color
+from .theme import (
+    cycle_color,
+    flowing_text,
+    gradient_text,
+    heat_stops,
+    is_tripping,
+    phase,
+    plasma,
+    pulse,
+    ramp_color,
+    role,
+)
 
 SPARKS = "▁▂▃▄▅▆▇█"
 BLOCKS = " ░▒▓█"
+
+
+# --- Chrome -------------------------------------------------------------------
+
+def live_border(offset: float = 0.0) -> str:
+    """Panel border style: a slow colour breath when tripping, else the theme.
+
+    ``offset`` staggers neighbouring panels so a row of them ripples rather
+    than flashing in unison.
+    """
+    if not is_tripping():
+        return "rs.border"
+    return f"bold {cycle_color(pulse(0.22, offset))}"
+
+
+def panel_title(label: str, offset: float = 0.0) -> Text:
+    """A ``◤ LABEL ◥`` panel title, flowing through the palette when tripping."""
+    tag = f"◤ {label} ◥"
+    if not is_tripping():
+        return Text(tag, style="rs.title")
+    return flowing_text(tag, offset=phase(0.6, offset), wavelength=12.0)
+
+
+def heading(message: str) -> Text:
+    """A centred dashboard heading; scrolls its gradient when tripping."""
+    if not is_tripping():
+        return gradient_text(message)
+    return flowing_text(message, offset=phase(0.45), wavelength=26.0)
+
+
+def frame(body: RenderableType, label: str | None = None, offset: float = 0.0,
+          box_style: box.Box = box.HEAVY,
+          padding: tuple[int, int] = (0, 1)) -> Panel:
+    """A themed panel. One place to change how every box in RedScan looks."""
+    return Panel(
+        body,
+        title=panel_title(label, offset) if label else None,
+        border_style=live_border(offset),
+        box=box_style,
+        padding=padding,
+    )
 
 
 def make_progress(description: str = "scanning") -> Progress:
@@ -55,32 +114,52 @@ def make_progress(description: str = "scanning") -> Progress:
     )
 
 
+# --- Small graphics -----------------------------------------------------------
+
 def sparkline(values: list[float], width: int = 48,
               ceiling: float | None = None) -> Text:
-    """Latency history as a heat-coloured sparkline."""
+    """Latency history as a heat-coloured sparkline.
+
+    Glyph height always encodes latency. The *colour* is what goes strange:
+    under a psychedelic palette it scrolls, so the history shimmers.
+    """
     text = Text()
     if not values:
         return Text("no samples yet", style="rs.muted")
     window = values[-width:]
     top = ceiling or max(window) or 1.0
-    for value in window:
+    tripping = is_tripping()
+    drift = phase(0.3) if tripping else 0.0
+    stops = heat_stops()
+    for i, value in enumerate(window):
         fraction = min(value / top, 1.0)
         glyph = SPARKS[min(int(fraction * (len(SPARKS) - 1)), len(SPARKS) - 1)]
-        text.append(glyph, style=f"bold {ramp_color(fraction)}")
+        color = (cycle_color(fraction * 0.6 + i / 40.0 - drift, stops)
+                 if tripping else ramp_color(fraction, stops))
+        text.append(glyph, style=f"bold {color}")
     return text
 
 
 def coverage_strip(done: int, total: int, open_count: int, width: int = 56) -> Text:
-    """A bar that fills with embers as the scan burns through the port list."""
+    """A bar that fills as the scan burns through the port list.
+
+    The filled region is a left-to-right ramp normally, and a live plasma wash
+    when tripping - the progress it encodes is identical either way.
+    """
     width = max(width, 10)
     filled = int(width * (done / total)) if total else 0
+    tripping = is_tripping()
+    now = phase(1.4) if tripping else 0.0
+    stops = heat_stops()
     text = Text()
     for i in range(width):
         if i < filled:
-            text.append("█", style=ramp_color(i / max(width - 1, 1),
-                                              [BLOOD, CRIMSON, RED, EMBER, FLARE]))
+            level = (plasma(i * 0.6, 0.0, now) if tripping
+                     else i / max(width - 1, 1))
+            text.append("█", style=cycle_color(level, stops) if tripping
+                        else ramp_color(level, stops))
         elif i == filled:
-            text.append("▓", style=f"bold {GLOW}")
+            text.append("▓", style=f"bold {role('glow')}")
         else:
             text.append("░", style="rs.border.dim")
     text.append(f"  {open_count} open", style="rs.open" if open_count else "rs.muted")
@@ -101,8 +180,8 @@ def target_panel(target: Target, extra: list[tuple[str, RenderableType]] | None 
                  title: str = "TARGET LOCKED") -> Panel:
     """Identity card for the host under the microscope."""
     rows: list[tuple[str, RenderableType]] = [
-        ("input", Text(target.raw, style=f"bold {GLOW}")),
-        ("address", Text(target.ip, style=f"bold {EMBER}")),
+        ("input", Text(target.raw, style=f"bold {role('glow')}")),
+        ("address", Text(target.ip, style=f"bold {role('bright')}")),
     ]
     if target.reverse:
         rows.append(("reverse dns", Text(target.reverse, style="rs.value")))
@@ -112,26 +191,22 @@ def target_panel(target: Target, extra: list[tuple[str, RenderableType]] | None 
              style="rs.hot"),
     ))
     rows.extend(extra or [])
-    return Panel(
-        kv_table(rows),
-        title=Text(f"◤ {title} ◥", style="rs.title"),
-        border_style="rs.border",
-        box=box.HEAVY,
-        padding=(0, 1),
-    )
+    return frame(kv_table(rows), title, offset=0.15)
 
 
 def port_table(results: list[PortResult], limit: int = 18,
                show_banner: bool = True) -> Table:
-    """The open-ports table, hottest service first."""
+    """The open-ports table, lowest port first."""
+    open_style = (f"bold {cycle_color(pulse(0.5))}" if is_tripping()
+                  else "rs.open")
     table = Table(
         box=box.SIMPLE_HEAD,
         border_style="rs.border.dim",
-        header_style=f"bold {CRIMSON}",
+        header_style=f"bold {role('strong')}",
         expand=True,
         pad_edge=False,
     )
-    table.add_column("PORT", justify="right", style=f"bold {FLARE}",
+    table.add_column("PORT", justify="right", style=f"bold {role('hot')}",
                      width=6, no_wrap=True)
     table.add_column("STATE", width=6, no_wrap=True)
     table.add_column("SERVICE", style="rs.value", width=15, no_wrap=True)
@@ -145,7 +220,7 @@ def port_table(results: list[PortResult], limit: int = 18,
         latency = f"{result.latency_ms:.0f} ms" if result.latency_ms is not None else "-"
         row = [
             str(result.port),
-            Text("OPEN", style="rs.open"),
+            Text("OPEN", style=open_style),
             result.service,
             latency,
         ]
@@ -153,14 +228,16 @@ def port_table(results: list[PortResult], limit: int = 18,
             row.append(result.banner or "—")
         table.add_row(*row)
 
+    # Both of these go in SERVICE: PORT and STATE are six columns wide, which
+    # silently clipped "waiting" to "waitin" and "+25 more" to "+25 mo".
     if not shown:
-        filler = ["—", Text("waiting", style="rs.muted"), "—", "—"]
+        filler = ["—", "—", Text("waiting", style="rs.muted"), "—"]
         if show_banner:
             filler.append("—")
         table.add_row(*filler)
     elif len(results) > limit:
         more = f"+{len(results) - limit} more"
-        row = [Text(more, style="rs.hot"), "", "", ""]
+        row = ["…", "", Text(more, style="rs.hot"), ""]
         if show_banner:
             row.append("")
         table.add_row(*row)
@@ -169,7 +246,7 @@ def port_table(results: list[PortResult], limit: int = 18,
 
 def counters(open_n: int, closed_n: int, filtered_n: int, elapsed: float,
              done: int) -> Columns:
-    """Four little stat tiles along the bottom."""
+    """Five little stat tiles along the bottom, borders staggered into a wave."""
     rate = done / elapsed if elapsed > 0 else 0.0
     tiles = [
         ("OPEN", str(open_n), "rs.open"),
@@ -182,15 +259,18 @@ def counters(open_n: int, closed_n: int, filtered_n: int, elapsed: float,
         Panel(
             Align.center(Text(value, style=style)),
             title=Text(label, style="rs.muted"),
-            border_style="rs.border.dim",
+            border_style=(live_border(i * 0.12) if is_tripping()
+                          else "rs.border.dim"),
             box=box.ROUNDED,
             padding=(0, 1),
             width=16,
         )
-        for label, value, style in tiles
+        for i, (label, value, style) in enumerate(tiles)
     ]
     return Columns(panels, align="center", expand=True)
 
+
+# --- Live scan ----------------------------------------------------------------
 
 @dataclass
 class ScanView:
@@ -222,33 +302,25 @@ class ScanView:
     def render(self, progress: Progress, width: int = 80) -> RenderableType:
         self.phase += 1
         strip_width = max(min(width - 22, 64), 12)
-        header = Panel(
-            Group(
-                Align.center(gradient_text("R E D S C A N   ::   L I V E   S W E E P")),
-                Align.center(sweep_bar(self.phase, strip_width)),
-            ),
-            border_style="rs.border",
-            box=box.HEAVY,
-            padding=(0, 1),
-        )
-        body = Panel(
+        header_bits: list[RenderableType] = [
+            Align.center(heading("R E D S C A N   ::   L I V E   S W E E P")),
+            Align.center(sweep_bar(self.phase, strip_width)),
+        ]
+        header = frame(Group(*header_bits))
+        body = frame(
             Group(
                 progress,
                 Text(""),
                 Align.center(coverage_strip(self.done, self.total,
                                             len(self.open_ports), strip_width)),
             ),
-            title=Text("◤ PROGRESS ◥", style="rs.title"),
-            border_style="rs.border",
-            box=box.HEAVY,
-            padding=(0, 1),
+            "PROGRESS",
+            offset=0.3,
         )
-        hits = Panel(
+        hits = frame(
             port_table(self.open_ports, show_banner=self.grab and width > 90),
-            title=Text("◤ OPEN PORTS ◥", style="rs.title"),
-            border_style="rs.border",
-            box=box.HEAVY,
-            padding=(0, 1),
+            "OPEN PORTS",
+            offset=0.45,
         )
         return Group(
             header,
@@ -261,13 +333,16 @@ class ScanView:
         )
 
 
+# --- Live ping ----------------------------------------------------------------
+
 def ping_panel(target: Target, stats: PingStats, history: list[Pong],
                width: int = 80) -> RenderableType:
     """Live ping dashboard: reply log, sparkline and rolling statistics."""
+    tripping = is_tripping()
     table = Table(
         box=box.SIMPLE_HEAD,
         border_style="rs.border.dim",
-        header_style=f"bold {CRIMSON}",
+        header_style=f"bold {role('strong')}",
         expand=True,
         pad_edge=False,
     )
@@ -278,14 +353,22 @@ def ping_panel(target: Target, stats: PingStats, history: list[Pong],
     table.add_column("TREND", overflow="crop")
 
     ceiling = max(stats.samples, default=1.0) or 1.0
-    for pong in history[-12:]:
+    drift = phase(0.4) if tripping else 0.0
+    stops = heat_stops()
+    for row_index, pong in enumerate(history[-12:]):
         if pong.latency_ms is None:
             table.add_row(str(pong.seq), Text("✖ LOST", style="rs.bad"),
                           Text(pong.error or "no reply", style="rs.bad"), "—", "")
             continue
         fraction = min(pong.latency_ms / ceiling, 1.0)
         bar_len = max(int(fraction * 24), 1)
-        bar = Text("▰" * bar_len, style=f"bold {ramp_color(fraction)}")
+        if tripping:
+            # Each bar is its own little gradient, offset per row.
+            bar = Text()
+            for i in range(bar_len):
+                bar.append("▰", style=f"bold {cycle_color(i / 20.0 + row_index / 14.0 - drift, stops)}")
+        else:
+            bar = Text("▰" * bar_len, style=f"bold {ramp_color(fraction, stops)}")
         table.add_row(
             str(pong.seq),
             Text("✔ REPLY", style="rs.good"),
@@ -311,53 +394,36 @@ def ping_panel(target: Target, stats: PingStats, history: list[Pong],
         ("os guess", Text(guess_os(last_ttl), style="rs.muted")),
     ]
 
-    graph = Panel(
+    graph = frame(
         Group(
             sparkline(stats.samples, width=max(width - 12, 20)),
             Text(f"peak {ceiling:.1f} ms", style="rs.muted"),
         ),
-        title=Text("◤ LATENCY ◥", style="rs.title"),
-        border_style="rs.border",
-        box=box.HEAVY,
-        padding=(0, 1),
+        "LATENCY",
+        offset=0.5,
     )
 
     return Group(
-        Panel(
-            Align.center(gradient_text("R E D S C A N   ::   P I N G   M O N I T O R")),
-            border_style="rs.border",
-            box=box.HEAVY,
-            padding=(0, 1),
-        ),
+        frame(Align.center(heading("R E D S C A N   ::   P I N G   M O N I T O R"))),
         target_panel(target, title="PINGING"),
-        Panel(
-            table,
-            title=Text("◤ REPLIES ◥", style="rs.title"),
-            border_style="rs.border",
-            box=box.HEAVY,
-            padding=(0, 1),
-        ),
+        frame(table, "REPLIES", offset=0.3),
         graph,
-        Panel(
-            kv_table(stat_rows),
-            title=Text("◤ STATISTICS ◥", style="rs.title"),
-            border_style="rs.border",
-            box=box.HEAVY,
-            padding=(0, 1),
-        ),
+        frame(kv_table(stat_rows), "STATISTICS", offset=0.65),
     )
 
+
+# --- Summaries ----------------------------------------------------------------
 
 def scan_summary(target: Target, view: ScanView) -> RenderableType:
     """The after-action report."""
     open_ports = sorted(view.open_ports, key=lambda r: r.port)
     verdict = (
-        gradient_text(f"{len(open_ports)} OPEN PORT{'S' if len(open_ports) != 1 else ''} FOUND")
+        heading(f"{len(open_ports)} OPEN PORT{'S' if len(open_ports) != 1 else ''} FOUND")
         if open_ports
         else Text("NO OPEN PORTS - the host is quiet or shielded", style="rs.muted")
     )
     rows: list[tuple[str, RenderableType]] = [
-        ("target", Text(target.label, style=f"bold {EMBER}")),
+        ("target", Text(target.label, style=f"bold {role('bright')}")),
         ("ports probed", Text(f"{view.done:,} of {view.total:,}", style="rs.value")),
         ("open", Text(str(len(open_ports)), style="rs.open")),
         ("closed", Text(f"{view.closed:,}", style="rs.closed")),
@@ -376,26 +442,21 @@ def scan_summary(target: Target, view: ScanView) -> RenderableType:
             Rule(style="rs.rule"),
             port_table(open_ports, limit=100),
         ])
-    return Panel(
-        Group(*pieces),
-        title=Text("◤ SCAN COMPLETE ◥", style="rs.title"),
-        border_style="rs.border",
-        box=box.DOUBLE,
-        padding=(1, 2),
-    )
+    return frame(Group(*pieces), "SCAN COMPLETE", box_style=box.DOUBLE,
+                 padding=(1, 2))
 
 
 def ping_summary(target: Target, stats: PingStats, history: list[Pong]) -> RenderableType:
     """Closing statistics for a ping run."""
     alive = stats.received > 0
     verdict = (
-        gradient_text(f"HOST IS UP - {stats.received}/{stats.sent} replies")
+        heading(f"HOST IS UP - {stats.received}/{stats.sent} replies")
         if alive
         else Text("HOST DID NOT ANSWER", style="rs.bad")
     )
     last_ttl = next((p.ttl for p in reversed(history) if p.ttl), None)
     rows: list[tuple[str, RenderableType]] = [
-        ("target", Text(target.label, style=f"bold {EMBER}")),
+        ("target", Text(target.label, style=f"bold {role('bright')}")),
         ("transmitted", Text(str(stats.sent), style="rs.value")),
         ("received", Text(str(stats.received), style="rs.good")),
         ("lost", Text(f"{stats.lost} ({stats.loss_pct:.0f}%)",
@@ -408,7 +469,7 @@ def ping_summary(target: Target, stats: PingStats, history: list[Pong]) -> Rende
         ("ttl / os guess", Text(f"{last_ttl or '—'}  ·  {guess_os(last_ttl)}",
                                 style="rs.muted")),
     ]
-    return Panel(
+    return frame(
         Group(
             Align.center(verdict),
             Rule(style="rs.rule"),
@@ -416,9 +477,8 @@ def ping_summary(target: Target, stats: PingStats, history: list[Pong]) -> Rende
             Rule(style="rs.rule"),
             Align.center(sparkline(stats.samples, width=60)),
         ),
-        title=Text("◤ PING COMPLETE ◥", style="rs.title"),
-        border_style="rs.border",
-        box=box.DOUBLE,
+        "PING COMPLETE",
+        box_style=box.DOUBLE,
         padding=(1, 2),
     )
 
