@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 import socket
 import sys
 import time
@@ -12,9 +13,8 @@ from dataclasses import asdict
 from pathlib import Path
 
 from rich.align import Align
-from rich.console import Console
+from rich.console import Console, RenderableType
 from rich.live import Live
-from rich.panel import Panel
 from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
@@ -24,7 +24,6 @@ from .banner import hero, logo_text
 from .net import (
     PingStats,
     Pong,
-
     Target,
     icmp_ping,
     local_ip,
@@ -33,9 +32,23 @@ from .net import (
     scan_ports,
     tcp_ping,
 )
-from .theme import EMBER, FLARE, GLOW, THEME, gradient_text
+from .theme import (
+    DEFAULT_PALETTE,
+    PALETTES,
+    Palette,
+    build_theme,
+    flowing_text,
+    heat_stops,
+    is_tripping,
+    phase,
+    ramp_color,
+    role,
+    set_palette,
+)
 from .ui import (
     ScanView,
+    frame,
+    heading,
     make_progress,
     notice,
     ping_panel,
@@ -43,6 +56,8 @@ from .ui import (
     scan_summary,
     target_panel,
 )
+
+PSYCHEDELIC = sorted(name for name, p in PALETTES.items() if p.psychedelic)
 
 MENU = [
     ("1", "Quick scan", "the 88 ports that matter, plus banner grabbing"),
@@ -52,12 +67,70 @@ MENU = [
     ("5", "TCP ping", "latency to one port when ICMP is blocked"),
     ("6", "Recon combo", "ping, then scan the top ports in one pass"),
     ("7", "My network", "this machine's addresses"),
+    ("8", "Repaint", "switch palette: " + ", ".join(sorted(PALETTES))),
     ("q", "Quit", "close the console"),
 ]
 
 
-def build_console() -> Console:
-    """A console that knows how to render red on every Windows terminal."""
+# --- Palette plumbing ---------------------------------------------------------
+
+_theme_depth = 0
+
+
+def apply_palette(console: Console, name: str) -> Palette:
+    """Switch palette and repaint the console's theme to match.
+
+    Rich resolves a theme once per push, so switching means swapping the whole
+    theme rather than mutating it. Any theme pushed earlier is popped first so
+    the stack cannot grow every time somebody presses 8.
+    """
+    global _theme_depth
+    palette = set_palette(name)
+    while _theme_depth:
+        console.pop_theme()
+        _theme_depth -= 1
+    console.push_theme(build_theme(palette))
+    _theme_depth += 1
+    return palette
+
+
+def resolve_palette(args: argparse.Namespace) -> str:
+    """Work out which palette the flags asked for.
+
+    ``--palette`` wins outright. ``--trip`` with no palette picks a random
+    psychedelic one, so consecutive runs do not look the same.
+    """
+    if args.palette:
+        return args.palette
+    if args.trip:
+        return random.choice(PSYCHEDELIC)
+    return DEFAULT_PALETTE
+
+
+def swatch(palette: Palette, width: int = 22) -> Text:
+    """A little gradient chip showing what a palette actually looks like."""
+    stops = heat_stops(palette)
+    text = Text()
+    for i in range(width):
+        text.append("█", style=ramp_color(i / max(width - 1, 1), stops))
+    return text
+
+
+def palette_gallery() -> RenderableType:
+    """The `--list-palettes` output: every palette, drawn rather than described."""
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="rs.key", justify="right", no_wrap=True)
+    table.add_column(no_wrap=True)
+    table.add_column(style="rs.muted")
+    for name in sorted(PALETTES):
+        palette = PALETTES[name]
+        label = f"{name}{' *' if palette.psychedelic else ''}"
+        table.add_row(label, swatch(palette), palette.blurb)
+    return frame(table, "PALETTES", padding=(1, 2))
+
+
+def build_console(palette: str = DEFAULT_PALETTE) -> Console:
+    """A console that knows how to render colour on every Windows terminal."""
     if sys.platform == "win32":  # make box drawing survive legacy code pages
         try:
             import ctypes
@@ -71,7 +144,9 @@ def build_console() -> Console:
                 stream.reconfigure(encoding="utf-8", errors="replace")
             except Exception:  # pragma: no cover - cosmetic only
                 pass
-    return Console(theme=THEME, highlight=False, soft_wrap=False)
+    console = Console(theme=build_theme(set_palette(palette)), highlight=False,
+                      soft_wrap=False)
+    return console
 
 
 # --- Animated intro -----------------------------------------------------------
@@ -83,6 +158,13 @@ BOOT_STEPS = [
     "calibrating the radar",
 ]
 
+TRIP_BOOT_STEPS = [
+    "dilating the sockets",
+    "loading 88 service fingerprints",
+    "arming the thread pool",
+    "calibrating the kaleidoscope",
+]
+
 
 def boot(console: Console, animate: bool = True) -> None:
     """The gratuitous startup animation. Worth every millisecond."""
@@ -91,21 +173,28 @@ def boot(console: Console, animate: bool = True) -> None:
         console.print(hero(console, phase=0, version=__version__))
         return
 
+    tripping = is_tripping()
     lines = logo_text(console).plain.splitlines()
     with Live(console=console, refresh_per_second=30, transient=True) as live:
         for rows in range(1, len(lines) + 1):  # logo wipes in line by line
             live.update(Align.center(logo_text(console, rows=rows)))
             time.sleep(0.055)
-        for phase in range(0, 26, 2):          # then the radar spins up
-            live.update(hero(console, phase=phase, version=__version__))
-            time.sleep(0.035)
+        # The radar spins up. When tripping, run it longer and smoother so the
+        # plasma field has time to visibly move across the art.
+        steps = range(0, 60) if tripping else range(0, 26, 2)
+        for step in steps:
+            live.update(hero(console, phase=step, version=__version__))
+            time.sleep(0.03 if tripping else 0.035)
     console.print(hero(console, phase=18, version=__version__))
 
+    steps_text = TRIP_BOOT_STEPS if tripping else BOOT_STEPS
     with Live(console=console, refresh_per_second=24, transient=True) as live:
-        for i, step in enumerate(BOOT_STEPS, start=1):
+        for i, step in enumerate(steps_text, start=1):
             dots = Text("".join("·" for _ in range(i * 3)), style="rs.dim")
+            label = (flowing_text(f"  {step} ", offset=phase(0.7)) if tripping
+                     else Text(f"  {step} ", style=f"bold {role('bright')}"))
             live.update(Align.center(Text.assemble(
-                (f"  {step} ", f"bold {EMBER}"), dots, ("  ok", f"bold {FLARE}"))))
+                label, dots, ("  ok", f"bold {role('hot')}"))))
             time.sleep(0.12)
     console.print()
 
@@ -119,6 +208,9 @@ def do_scan(console: Console, target: Target, ports: list[int], workers: int,
     progress = make_progress()
     task = progress.add_task("sweeping ports", total=len(ports))
     last_draw = 0.0
+    # A moving palette has to be redrawn to move, so a quiet scan still needs
+    # frames. A still one only redraws when something actually changed.
+    idle_redraw = 0.05 if is_tripping() else 0.07
 
     with Live(view.render(progress, console.width), console=console,
               refresh_per_second=15, transient=True) as live:
@@ -128,7 +220,7 @@ def do_scan(console: Console, target: Target, ports: list[int], workers: int,
             progress.advance(task)
             now = time.perf_counter()
             # Redrawing on every one of 65k results would out-run the terminal.
-            if result.is_open or now - last_draw > 0.07:
+            if result.is_open or now - last_draw > idle_redraw:
                 live.update(view.render(progress, console.width))
                 last_draw = now
         live.update(view.render(progress, console.width))
@@ -158,12 +250,31 @@ def do_ping(console: Console, target: Target, count: int, interval: float,
                 history.append(pong)
                 live.update(ping_panel(target, stats, history, console.width))
                 if endless or seq < count:
-                    time.sleep(interval)
+                    _wait(live, target, stats, history, console, interval)
     except KeyboardInterrupt:
         notice(console, "interrupted", "rs.warn")
 
     console.print(ping_summary(target, stats, history))
     return stats, history
+
+
+def _wait(live: Live, target: Target, stats: PingStats, history: list[Pong],
+          console: Console, interval: float) -> None:
+    """Sleep between pings, animating through the gap when the palette moves.
+
+    A one-second interval used to mean one second of a frozen dashboard; a
+    psychedelic palette needs frames to be psychedelic.
+    """
+    if not is_tripping():
+        time.sleep(interval)
+        return
+    deadline = time.perf_counter() + interval
+    while True:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, 1 / 12))
+        live.update(ping_panel(target, stats, history, console.width))
 
 
 def do_network_info(console: Console) -> None:
@@ -184,13 +295,8 @@ def do_network_info(console: Console) -> None:
     table.add_column(justify="right", style="rs.label")
     table.add_column(style="rs.value")
     for label, value in rows:
-        table.add_row(label, Text(str(value), style=f"bold {GLOW}"))
-    console.print(Panel(
-        table,
-        title=Text("◤ THIS MACHINE ◥", style="rs.title"),
-        border_style="rs.border",
-        padding=(1, 2),
-    ))
+        table.add_row(label, Text(str(value), style=f"bold {role('glow')}"))
+    console.print(frame(table, "THIS MACHINE", padding=(1, 2)))
 
 
 # --- Export -------------------------------------------------------------------
@@ -232,26 +338,37 @@ def export_results(console: Console, target: Target, view: ScanView,
 def show_menu(console: Console) -> None:
     table = Table.grid(padding=(0, 2))
     table.add_column(justify="right", style="rs.key", width=3)
-    table.add_column(style=f"bold {GLOW}", width=18)
+    table.add_column(style=f"bold {role('glow')}", width=18)
     table.add_column(style="rs.muted")
     for key, label, blurb in MENU:
         table.add_row(f"[{key}]", label, blurb)
-    console.print(Panel(
-        table,
-        title=Text("◤ CHOOSE YOUR WEAPON ◥", style="rs.title"),
-        border_style="rs.border",
-        padding=(1, 2),
-    ))
+    console.print(frame(table, "CHOOSE YOUR WEAPON", padding=(1, 2)))
 
 
 def ask(console: Console, prompt: str, default: str = "") -> str:
-    """Prompt with the red theme; empty input falls back to ``default``."""
+    """Prompt with the active theme; empty input falls back to ``default``."""
     suffix = f" [rs.muted]({default})[/]" if default else ""
     try:
         answer = console.input(f"[rs.key]▸[/] [rs.label]{prompt}[/]{suffix} [rs.hot]»[/] ")
     except (EOFError, KeyboardInterrupt):
         return ""
     return answer.strip() or default
+
+
+def choose_palette(console: Console) -> None:
+    """Menu action 8: show the gallery and repaint to whatever is picked."""
+    console.print(palette_gallery())
+    name = ask(console, "palette", "kaleido").lower()
+    if not name:
+        return
+    if name == "random":
+        name = random.choice(PSYCHEDELIC)
+    if name not in PALETTES:
+        notice(console, f"unknown palette {name!r}", "rs.bad")
+        return
+    palette = apply_palette(console, name)
+    notice(console, f"repainted: {palette.name} - {palette.blurb}", "rs.good")
+    console.print(hero(console, phase=18, version=__version__))
 
 
 def resolve_or_report(console: Console, host: str) -> Target | None:
@@ -272,12 +389,17 @@ def interactive(console: Console, args: argparse.Namespace) -> int:
         console.print()
 
         if choice in {"q", "quit", "exit"}:
-            console.print(Align.center(gradient_text("stay curious. stay authorised.")))
+            console.print(Align.center(heading("stay curious. stay authorised.")))
             console.print()
             return 0
 
         if choice == "7":
             do_network_info(console)
+            console.print(Rule(style="rs.rule"))
+            continue
+
+        if choice == "8":
+            choose_palette(console)
             console.print(Rule(style="rs.rule"))
             continue
 
@@ -360,6 +482,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="skip service banner grabbing")
     parser.add_argument("--no-anim", action="store_true",
                         help="skip the startup animation")
+
+    colour = parser.add_argument_group("colour")
+    colour.add_argument("--palette", choices=sorted(PALETTES), metavar="NAME",
+                        help="colour palette: " + ", ".join(sorted(PALETTES)))
+    colour.add_argument("--trip", action="store_true",
+                        help="pick a random psychedelic palette")
+    colour.add_argument("--list-palettes", action="store_true",
+                        help="show every palette and exit")
+
     parser.add_argument("--json", metavar="FILE", help="write results to JSON")
     parser.add_argument("--csv", metavar="FILE", help="write open ports to CSV")
     parser.add_argument("--net-info", action="store_true",
@@ -373,8 +504,13 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     parser = build_parser()
     args = parser.parse_args(argv)
-    console = build_console()
+    console = build_console(resolve_palette(args))
     launched_bare = not argv
+
+    if args.list_palettes:
+        console.print()
+        console.print(palette_gallery())
+        return 0
 
     boot(console, animate=not args.no_anim)
 

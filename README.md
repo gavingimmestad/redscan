@@ -6,7 +6,8 @@
 
 <p align="center">
   <strong>An unreasonably good looking port scanner and IP pinger for the terminal.</strong><br>
-  Live radar sweep, ember-gradient progress bars, banner grabbing, latency sparklines.
+  Live radar sweep, plasma-lit banner, banner grabbing, latency sparklines —
+  in angry red, or in five palettes that will not sit still.
 </p>
 
 <p align="center">
@@ -33,7 +34,8 @@
 Because `nmap` output is grey, and a tool you look at for ten minutes at a time
 should be worth looking at. RedScan does the same honest work — TCP connect
 scanning, ICMP latency, service fingerprints — behind a dashboard that updates
-live in a single shade of angry red.
+live in a single shade of angry red. Or, if you would rather it did not, in a
+palette whose hues rotate while you watch.
 
 ## Features
 
@@ -48,6 +50,7 @@ live in a single shade of angry red.
 | **No admin needed** | No raw sockets anywhere — ICMP goes through the system `ping`, everything else is a plain TCP connect |
 | **Exports** | `--json` and `--csv` for when the pretty version has to become a ticket |
 | **Interactive menu** | Double-click the `.exe` and it asks what you want instead of printing usage and vanishing |
+| **Six palettes** | Red by default. `--trip` picks one of five psychedelic ones, where the banner is lit by a moving plasma field, the radar grows three comet heads, borders breathe and every hue rotates in real time |
 
 ## Install
 
@@ -77,7 +80,30 @@ redscan router.lan -P -p top        # ping first, then scan
 redscan 10.0.0.5 --tcp-ping 443     # latency to one port, no ICMP
 redscan scanme.nmap.org --json out.json --csv ports.csv
 redscan --net-info                  # this machine's addresses
+redscan --trip 192.168.1.1          # same scan, considerably less red
+redscan --palette vapor             # pick a specific palette
+redscan --list-palettes             # see them all first
 ```
+
+### Palettes
+
+```
+  acid *  ██████████████████████  purple into magenta into molten yellow
+kaleido *  ██████████████████████  the full spectrum, spinning hard
+    oil *  ██████████████████████  iridescent oil slick on wet asphalt
+      red  ██████████████████████  the original: ash, blood, crimson, ember, flare
+  ultra *  ██████████████████████  blacklight: UV violet and electric mint
+  vapor *  ██████████████████████  vaporwave: indigo, hot pink, pool-water cyan
+```
+
+`*` marks the palettes that move. Their hues rotate continuously, so the same
+colour asked for a second apart comes back different — which is what drives the
+plasma-lit logo, the scrolling gradients, the breathing borders and the
+rippling coverage strip. `red` is still the default and still perfectly still.
+
+Press `8` in the interactive menu to repaint mid-session, or answer `random`
+there to be surprised. Nothing about the *data* changes with the palette: glyph
+heights, counts and progress mean exactly the same thing in every one of them.
 
 ### Options
 
@@ -94,6 +120,9 @@ redscan --net-info                  # this machine's addresses
 | `--timeout-ms` | Ping timeout in milliseconds (default `1200`) |
 | `--no-banner` | Skip banner grabbing (faster, quieter) |
 | `--no-anim` | Skip the startup animation |
+| `--palette NAME` | `red`, `acid`, `vapor`, `oil`, `ultra` or `kaleido` |
+| `--trip` | Pick a random psychedelic palette |
+| `--list-palettes` | Show every palette and exit |
 | `--json`, `--csv` | Write results to disk |
 | `--net-info` | Show local addresses and exit |
 
@@ -125,16 +154,28 @@ pyinstaller --onefile --name RedScan --console run_redscan.py
 ```
 redscan/
 ├── redscan/
-│   ├── theme.py     red palette, gradient maths, Rich theme
-│   ├── banner.py    the oversized logo and the radar sweep
+│   ├── theme.py     palettes, hue spin, gradients, plasma, Rich theme
+│   ├── banner.py    the oversized logo, the radar sweep, the ripple rule
 │   ├── net.py       resolution, ICMP/TCP ping, threaded scanning
 │   ├── ui.py        every panel, table, sparkline and stat tile
-│   └── cli.py       arguments, interactive menu, exports
+│   └── cli.py       arguments, palette selection, interactive menu, exports
+├── tests/           212 tests, run against a still and a moving palette
 ├── tools/
 │   └── make_icon.py renders assets/redscan.ico with no image libraries
 ├── run_redscan.py   PyInstaller entry point
 └── build.ps1        one-file Windows build
 ```
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Most of the UI suite runs twice, once on a still palette and once on a moving
+one, asserting on the information rather than the colours: a tall sparkline bar
+has to mean a slow reply no matter what hue it happens to be.
 
 ## Scan only what you are allowed to scan
 
