@@ -80,6 +80,18 @@ def test_a_closed_port_is_reported_as_closed_and_quickly():
     assert time.perf_counter() - started < 0.5
 
 
+def test_only_open_ports_pay_for_an_os_service_lookup(monkeypatch):
+    """getservbyport costs more than the probe itself on Windows, on all 65,535 ports."""
+    asked = []
+    monkeypatch.setattr(net, "service_name", lambda port: asked.append(port) or "looked-up")
+    closed = free_port()
+    assert net.probe_port("127.0.0.1", closed).service != "looked-up"
+    assert asked == []
+    with service(b"x") as port:
+        assert net.probe_port("127.0.0.1", port).service == "looked-up"
+    assert asked == [port]
+
+
 def test_a_listening_port_is_open_with_its_banner():
     with service(b"220 hello\r\n") as port:
         result = net.probe_port("127.0.0.1", port)

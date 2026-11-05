@@ -387,7 +387,6 @@ def _tcp_socket(timeout: float) -> socket.socket:
 def probe_port(ip: str, port: int, timeout: float = 0.6,
                grab: bool = True) -> PortResult:
     """Connect to one TCP port and classify the result."""
-    name = service_name(port)
     sock = _tcp_socket(timeout)
     started = time.perf_counter()
     try:
@@ -395,11 +394,14 @@ def probe_port(ip: str, port: int, timeout: float = 0.6,
         elapsed = round((time.perf_counter() - started) * 1000, 2)
         if code == 0:
             banner = _grab_banner(sock, port) if grab else None
-            return PortResult(port, "open", name, elapsed, banner)
+            return PortResult(port, "open", service_name(port), elapsed, banner)
         # ECONNREFUSED means something is home and said no; the rest is silence.
-        return PortResult(port, "closed" if code in _REFUSED else "filtered", name, elapsed)
+        # Only open ports ever show a service name, and asking the OS for one costs more
+        # than the probe itself on Windows, so the rest just get the built-in table.
+        return PortResult(port, "closed" if code in _REFUSED else "filtered",
+                          SERVICES.get(port, "unknown"), elapsed)
     except OSError:
-        return PortResult(port, "filtered", name)
+        return PortResult(port, "filtered", SERVICES.get(port, "unknown"))
     finally:
         try:
             sock.close()
