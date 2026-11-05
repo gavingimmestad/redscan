@@ -6,7 +6,9 @@ import ipaddress
 import platform
 import re
 import socket
+import struct
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -177,13 +179,17 @@ def icmp_ping(ip: str, seq: int = 0, timeout_ms: int = 1200) -> Pong:
 
 def tcp_ping(ip: str, port: int, seq: int = 0, timeout: float = 1.2) -> Pong:
     """Latency to an open TCP port - works where ICMP is firewalled off."""
+    sock = _tcp_socket(timeout)
     started = time.perf_counter()
     try:
-        with socket.create_connection((ip, port), timeout=timeout):
-            pass
-    except OSError as exc:
-        return Pong(seq, None, error=getattr(exc, "strerror", None) or "closed")
-    return Pong(seq, round((time.perf_counter() - started) * 1000, 2))
+        code = sock.connect_ex((ip, port))
+    except OSError:
+        return Pong(seq, None, error="no reply")
+    finally:
+        sock.close()
+    if code == 0:
+        return Pong(seq, round((time.perf_counter() - started) * 1000, 2))
+    return Pong(seq, None, error="refused" if code in _REFUSED else "no reply")
 
 
 @dataclass(slots=True)
@@ -311,12 +317,51 @@ def _grab_banner(sock: socket.socket, port: int) -> str | None:
     return cleaned[:96] or None
 
 
+_REFUSED = (10061, 111, 61)  # ECONNREFUSED on Windows, Linux and macOS
+
+# SIO_TCP_INITIAL_RTO, with TCP_INITIAL_RTO_PARAMETERS set to "leave the RTT alone,
+# send no SYN retransmissions". The struct is four bytes once padded.
+_SIO_TCP_INITIAL_RTO = 0x98000011
+_NO_SYN_RETRIES = struct.pack("<HBx", 0xFFFF, 0xFE)
+
+
+def _disable_syn_retries(sock: socket.socket) -> None:
+    """Make Windows report a refused connection the moment it is refused.
+
+    Windows answers an RST by trying again, twice, half a second apart, so a closed
+    port takes two seconds to say no. Any shorter timeout, the default included,
+    called every closed port "filtered". A silent host still times out exactly as
+    before, and a lost SYN would not have been retried inside the default timeout
+    anyway. Best effort: if the call is unsupported we just wait like everyone else.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        returned = wintypes.DWORD()
+        wsa_ioctl = ctypes.windll.ws2_32.WSAIoctl
+        wsa_ioctl.argtypes = [ctypes.c_size_t, wintypes.DWORD, ctypes.c_char_p, wintypes.DWORD,
+                              ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+                              ctypes.c_void_p, ctypes.c_void_p]
+        wsa_ioctl(sock.fileno(), _SIO_TCP_INITIAL_RTO, _NO_SYN_RETRIES, len(_NO_SYN_RETRIES),
+                  None, 0, ctypes.byref(returned), None, None)
+    except (ImportError, AttributeError, OSError):
+        pass
+
+
+def _tcp_socket(timeout: float) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if IS_WINDOWS:
+        _disable_syn_retries(sock)
+    sock.settimeout(timeout)
+    return sock
+
+
 def probe_port(ip: str, port: int, timeout: float = 0.6,
                grab: bool = True) -> PortResult:
     """Connect to one TCP port and classify the result."""
     name = service_name(port)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
+    sock = _tcp_socket(timeout)
     started = time.perf_counter()
     try:
         code = sock.connect_ex((ip, port))
@@ -325,8 +370,7 @@ def probe_port(ip: str, port: int, timeout: float = 0.6,
             banner = _grab_banner(sock, port) if grab else None
             return PortResult(port, "open", name, elapsed, banner)
         # ECONNREFUSED means something is home and said no; the rest is silence.
-        refused = code in (10061, 111, 61)
-        return PortResult(port, "closed" if refused else "filtered", name, elapsed)
+        return PortResult(port, "closed" if code in _REFUSED else "filtered", name, elapsed)
     except OSError:
         return PortResult(port, "filtered", name)
     finally:

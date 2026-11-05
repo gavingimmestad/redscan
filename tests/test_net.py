@@ -68,3 +68,50 @@ def test_only_clean_text_survives_from_a_banner(sent, shown):
         result = net.probe_port("127.0.0.1", port, timeout=1.0)
     assert result.state == "open"
     assert result.banner == shown
+
+
+# --- Probing ------------------------------------------------------------------
+
+def test_a_closed_port_is_reported_as_closed_and_quickly():
+    """Windows used to retry for two seconds, past the default timeout: "filtered"."""
+    started = time.perf_counter()
+    result = net.probe_port("127.0.0.1", free_port())
+    assert result.state == "closed"
+    assert time.perf_counter() - started < 0.5
+
+
+def test_a_listening_port_is_open_with_its_banner():
+    with service(b"220 hello\r\n") as port:
+        result = net.probe_port("127.0.0.1", port)
+    assert result.is_open and result.banner == "220 hello" and result.latency_ms is not None
+
+
+def test_a_silent_service_is_open_with_no_banner():
+    with service(None) as port:
+        result = net.probe_port("127.0.0.1", port)
+    assert result.is_open and result.banner is None
+
+
+def test_grabbing_can_be_turned_off():
+    with service(b"220 hello\r\n") as port:
+        assert net.probe_port("127.0.0.1", port, grab=False).banner is None
+
+
+def test_http_ports_are_asked_a_question_before_listening(monkeypatch):
+    with service(b"HTTP/1.1 200 OK\r\nServer: x\r\n\r\n", wait_for_request=True) as port:
+        monkeypatch.setattr(net, "HTTP_PORTS", {port})
+        assert net.probe_port("127.0.0.1", port).banner == "HTTP/1.1 200 OK"
+
+
+def test_tcp_ping_measures_an_open_port():
+    with service(b"x") as port:
+        pong = net.tcp_ping("127.0.0.1", port, seq=7)
+    assert pong.alive and pong.seq == 7
+
+
+def test_tcp_ping_says_refused_plainly_and_quickly():
+    """The monitor's latency column is eleven wide, so no paragraph from the OS."""
+    started = time.perf_counter()
+    pong = net.tcp_ping("127.0.0.1", free_port())
+    assert not pong.alive and pong.error == "refused"
+    assert time.perf_counter() - started < 0.5
