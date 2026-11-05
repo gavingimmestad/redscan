@@ -225,7 +225,9 @@ def port_table(results: list[PortResult], limit: int = 18,
             latency,
         ]
         if show_banner:
-            row.append(result.banner or "—")
+            # Text, not str: a Rich table parses a plain string as markup, and this
+            # one came off the network. "[/x]" in a banner used to kill the whole scan.
+            row.append(Text(result.banner) if result.banner else "—")
         table.add_row(*row)
 
     # Both of these go in SERVICE: PORT and STATE are six columns wide, which

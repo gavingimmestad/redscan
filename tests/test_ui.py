@@ -346,3 +346,17 @@ def test_notice_prefixes_with_a_marker(palette):
     console = make_console()
     ui.notice(console, "interrupted")
     assert "▸ interrupted" in console.export_text()
+
+
+# --- Hostile banners ----------------------------------------------------------
+
+@pytest.mark.parametrize("banner", [
+    "220 [/oops] closing a tag nobody opened",
+    "[bold red]styled by the far end[/bold red]",
+    "[link=http://evil.example]click[/link]",
+    "ftp [/]",
+])
+def test_a_banner_is_shown_literally_and_cannot_crash_the_table(banner):
+    console = Console(file=io.StringIO(), width=140, record=True, theme=theme.THEME)
+    console.print(ui.port_table([PortResult(21, "open", "ftp", 1.0, banner)]))
+    assert banner in console.export_text()

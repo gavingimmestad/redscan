@@ -286,7 +286,12 @@ class PortResult:
         return self.state == "open"
 
 
-_BANNER_STRIP = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# A banner is whatever the far end felt like sending, so nothing that can steer a
+# terminal or disguise text gets through: C0 and C1 controls (0x9b is a one-byte CSI),
+# zero-width and bidi overrides, and the replacement characters binary decodes into.
+_BANNER_STRIP = re.compile(
+    r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff\ufffd]"
+)
 
 
 def _grab_banner(sock: socket.socket, port: int) -> str | None:
