@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import csv
 import io
+import json
 
 import pytest
 from rich.console import Console
@@ -425,3 +427,67 @@ def test_impossible_flag_values_are_refused_up_front(argv, capsys):
 ])
 def test_sensible_flag_values_still_work(argv, attribute, value):
     assert getattr(parse(*argv), attribute) == value
+
+
+# --- Exports ------------------------------------------------------------------
+
+def finished_view(*banners: str) -> ScanView:
+    view = ScanView(target=TARGET, total=len(banners) + 1)
+    for port, banner in enumerate(banners, start=1000):
+        view.record(PortResult(port, "open", "x", 1.5, banner))
+    view.record(PortResult(9, "closed", "discard"))
+    return view
+
+
+def test_exports_hold_what_the_scan_found(tmp_path):
+    json_path, csv_path = tmp_path / "out.json", tmp_path / "out.csv"
+    console = make_console(160)
+    assert cli.export_results(console, TARGET, finished_view('smtp, "quoted"', "ssh"),
+                              str(json_path), str(csv_path))
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    assert data["counts"] == {"open": 2, "closed": 1, "filtered": 0}
+    assert (data["scanned"], data["queued"]) == (3, 3)
+    assert [p["port"] for p in data["open_ports"]] == [1000, 1001]
+    rows = list(csv.DictReader(csv_path.open(encoding="utf-8", newline="")))
+    assert [(r["port"], r["banner"]) for r in rows] == [("1000", 'smtp, "quoted"'), ("1001", "ssh")]
+
+
+@pytest.mark.parametrize("banner", ["=cmd()", "+1+1", "-2+3", "@SUM(A1)", "\tx"])
+def test_a_banner_cannot_become_a_spreadsheet_formula(tmp_path, banner):
+    csv_path = tmp_path / "out.csv"
+    cli.export_results(make_console(160), TARGET, finished_view(banner), None, str(csv_path))
+    row = next(csv.DictReader(csv_path.open(encoding="utf-8", newline="")))
+    assert row["banner"] == "'" + banner
+
+
+def test_the_json_keeps_a_banner_exactly_as_sent(tmp_path):
+    json_path = tmp_path / "out.json"
+    cli.export_results(make_console(160), TARGET, finished_view("=cmd()"), str(json_path), None)
+    assert json.loads(json_path.read_text(encoding="utf-8"))["open_ports"][0]["banner"] == "=cmd()"
+
+
+def test_an_unwritable_path_is_reported_not_raised(tmp_path):
+    console = make_console(200)
+    missing = tmp_path / "no" / "such" / "folder"
+    assert not cli.export_results(console, TARGET, finished_view("x"),
+                                  str(missing / "a.json"), str(tmp_path))
+    text = console.export_text()
+    assert text.count("could not write") == 2
+
+
+def test_one_bad_export_does_not_stop_the_other(tmp_path):
+    csv_path = tmp_path / "out.csv"
+    console = make_console(200)
+    assert not cli.export_results(console, TARGET, finished_view("x"),
+                                  str(tmp_path / "no" / "a.json"), str(csv_path))
+    assert csv_path.exists()
+
+
+def test_a_failed_export_shows_in_the_exit_code(monkeypatch, tmp_path):
+    complete = finished_view("x")
+    monkeypatch.setattr(cli, "build_console", lambda palette="red": make_console(200))
+    monkeypatch.setattr(cli, "boot", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "resolve_or_report", lambda console, host: TARGET)
+    monkeypatch.setattr(cli, "do_scan", lambda *a, **k: complete)
+    assert cli.main(["10.0.0.5", "-p", "22", "--csv", str(tmp_path)]) == 1
+    assert cli.main(["10.0.0.5", "-p", "22", "--csv", str(tmp_path / "ok.csv")]) == 0

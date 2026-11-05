@@ -369,9 +369,23 @@ def do_network_info(console: Console) -> None:
 
 # --- Export -------------------------------------------------------------------
 
+def _spreadsheet_safe(cell: str) -> str:
+    """Stop a banner from being a formula when the CSV lands in a spreadsheet.
+
+    Banners come off the network, so a service could otherwise put =cmd(...) into a
+    file the person who scanned it is about to open. A leading quote is the usual fix.
+    """
+    return f"'{cell}" if cell[:1] in ("=", "+", "-", "@", "\t", "\r") else cell
+
+
 def export_results(console: Console, target: Target, view: ScanView,
-                   json_path: str | None, csv_path: str | None) -> None:
-    """Write scan results to disk in whichever formats were requested."""
+                   json_path: str | None, csv_path: str | None) -> bool:
+    """Write results in the requested formats. Returns False if any write failed.
+
+    A bad path is reported rather than raised: the scan is already done, and however
+    long it took, a typo in a filename should not end on a traceback.
+    """
+    ok = True
     if json_path:
         payload = {
             "target": asdict(target),
@@ -387,18 +401,27 @@ def export_results(console: Console, target: Target, view: ScanView,
                                                      key=lambda r: r.port)],
         }
         path = Path(json_path)
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        notice(console, f"json written to {path.resolve()}", "rs.good")
+        try:
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            notice(console, f"json written to {path.resolve()}", "rs.good")
+        except OSError as exc:
+            notice(console, f"could not write {path}: {exc.strerror or exc}", "rs.bad")
+            ok = False
 
     if csv_path:
         path = Path(csv_path)
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(["port", "state", "service", "latency_ms", "banner"])
-            for result in sorted(view.open_ports, key=lambda r: r.port):
-                writer.writerow([result.port, result.state, result.service,
-                                 result.latency_ms, result.banner or ""])
-        notice(console, f"csv written to {path.resolve()}", "rs.good")
+        try:
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["port", "state", "service", "latency_ms", "banner"])
+                for result in sorted(view.open_ports, key=lambda r: r.port):
+                    writer.writerow([result.port, result.state, result.service,
+                                     result.latency_ms, _spreadsheet_safe(result.banner or "")])
+            notice(console, f"csv written to {path.resolve()}", "rs.good")
+        except OSError as exc:
+            notice(console, f"could not write {path}: {exc.strerror or exc}", "rs.bad")
+            ok = False
+    return ok
 
 
 # --- Interactive menu ---------------------------------------------------------
@@ -629,8 +652,10 @@ def main(argv: list[str] | None = None) -> int:
 
         view = do_scan(console, target, ports, args.workers, args.timeout,
                        not args.no_banner)
-        export_results(console, target, view, args.json, args.csv)
-        return 130 if view.done < view.total else 0
+        exported = export_results(console, target, view, args.json, args.csv)
+        if view.done < view.total:
+            return 130
+        return 0 if exported else 1
     except KeyboardInterrupt:
         notice(console, "aborted", "rs.warn")
         return 130
