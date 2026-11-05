@@ -210,7 +210,6 @@ def test_a_linux_host_that_stays_silent_is_not_alive(monkeypatch):
 
 
 def test_undecodable_ping_output_cannot_fail_the_reply(monkeypatch):
-    assert canned_ping(monkeypatch, "x TTL=5")  is not None
     captured = canned_ping(monkeypatch, "Reply: bytes=32 time=1ms TTL=5")
     net.icmp_ping("8.8.8.8")
     assert captured["errors"] == "replace"
@@ -241,10 +240,22 @@ def test_a_bad_name_is_a_readable_error(host):
 
 def test_a_slow_reverse_lookup_cannot_hold_up_the_start(monkeypatch):
     """gethostbyaddr ignores socket timeouts: this sat for 5s on any address with no PTR."""
-    monkeypatch.setattr(net.socket, "gethostbyaddr", lambda ip: time.sleep(10))
+    answered = threading.Event()
+
+    def slow(ip):
+        answered.wait(5)
+        return ("late.example", [], [ip])
+
+    monkeypatch.setattr(net.socket, "gethostbyaddr", slow)
     started = time.perf_counter()
     assert net._reverse_dns("10.0.0.5", deadline=0.1) is None
     assert time.perf_counter() - started < 1.0
+    answered.set()
+
+
+def test_a_reverse_lookup_that_answers_in_time_is_used(monkeypatch):
+    monkeypatch.setattr(net.socket, "gethostbyaddr", lambda ip: ("router.lan", [], [ip]))
+    assert net._reverse_dns("10.0.0.5") == "router.lan"
 
 
 def test_a_failed_reverse_lookup_is_just_no_name(monkeypatch):

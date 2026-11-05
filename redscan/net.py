@@ -12,6 +12,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Iterable, Iterator
 
 IS_WINDOWS = platform.system().lower().startswith("win")
@@ -141,8 +142,8 @@ class Pong:
         return self.latency_ms is not None
 
 
-# Windows translates everything here but "TTL=": Zeit=12ms, temps=12 ms, \u0432\u0440\u0435\u043c\u044f=12\u043c\u0441.
-# So take the number right before the TTL, not the one after a word meaning "time".
+# Windows translates everything here but "TTL=": Zeit=12ms in German, temps=12 ms in
+# French. So take the number right before the TTL, not the one after the word for time.
 _WIN_TIME = re.compile(r"[=<]\s*(\d+)\s*[^\s=<]*\s+TTL=", re.IGNORECASE)
 _NIX_TIME = re.compile(r"time\s*[=<]\s*([\d.]+)\s*ms", re.IGNORECASE)
 _TTL = re.compile(r"ttl[=:]\s*(\d+)", re.IGNORECASE)
@@ -355,18 +356,24 @@ def _disable_syn_retries(sock: socket.socket) -> None:
     anyway. Best effort: if the call is unsupported we just wait like everyone else.
     """
     try:
-        import ctypes
-        from ctypes import wintypes
-
-        returned = wintypes.DWORD()
-        wsa_ioctl = ctypes.windll.ws2_32.WSAIoctl
-        wsa_ioctl.argtypes = [ctypes.c_size_t, wintypes.DWORD, ctypes.c_char_p, wintypes.DWORD,
-                              ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
-                              ctypes.c_void_p, ctypes.c_void_p]
+        wsa_ioctl, returned = _wsa_ioctl()
         wsa_ioctl(sock.fileno(), _SIO_TCP_INITIAL_RTO, _NO_SYN_RETRIES, len(_NO_SYN_RETRIES),
-                  None, 0, ctypes.byref(returned), None, None)
+                  None, 0, returned(), None, None)
     except (ImportError, AttributeError, OSError):
         pass
+
+
+@lru_cache(maxsize=1)
+def _wsa_ioctl():
+    """WSAIoctl from Winsock, and a maker for the out-parameter it insists on."""
+    import ctypes
+    from ctypes import wintypes
+
+    function = ctypes.WinDLL("ws2_32").WSAIoctl
+    function.argtypes = [ctypes.c_size_t, wintypes.DWORD, ctypes.c_char_p, wintypes.DWORD,
+                         ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+                         ctypes.c_void_p, ctypes.c_void_p]
+    return function, lambda: ctypes.byref(wintypes.DWORD())
 
 
 def _tcp_socket(timeout: float) -> socket.socket:

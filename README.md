@@ -220,7 +220,7 @@ redscan/
 │   ├── net.py       resolution, ICMP/TCP ping, threaded scanning
 │   ├── ui.py        every panel, table, sparkline and stat tile
 │   └── cli.py       arguments, palette selection, interactive menu, exports
-├── tests/           263 tests, run against a still and a moving palette
+├── tests/           385 tests, including real sockets on loopback
 ├── tools/
 │   ├── make_icon.py renders assets/redscan.ico with no image libraries
 │   └── make_demo.py renders the detonation to assets/nuke.gif, no terminal needed
