@@ -298,7 +298,7 @@ def build_theme(palette: Palette | None = None) -> Theme:
             "rs.closed": deep,
             "rs.filtered": blend(deep, glow, 0.4),
             "rs.good": f"bold {hot}",
-            "rs.bad": f"bold {mid}",
+            "rs.bad": f"bold {core}",
             "rs.border": strong,
             "rs.border.dim": deep,
             "rs.void": void,
