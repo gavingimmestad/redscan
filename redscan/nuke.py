@@ -183,7 +183,7 @@ class Detonation:
         self.height = max(height, 1)
         self.label = label
         self.glow = glow
-        self.ground = self.height - 5
+        self.ground = max(self.height - 5, 1)
         self.centre = self.width // 2
         # The largest cloud that fits both ways: full height is one scale, the
         # cap's full width is about 2.5 scales of columns.

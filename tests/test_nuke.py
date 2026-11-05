@@ -257,6 +257,12 @@ def test_detonate_survives_the_terminal_being_resized(monkeypatch):
     monkeypatch.setattr(nuke.time, "sleep", slow_sleep)
     nuke.detonate(console, "x")
     assert clock["now"] >= DURATION - 0.1
+    # A drag can land on any size at all, however silly, and that must not kill the monitor.
+    for width, height in ((1, 1), (2, 4), (5, 5), (8, 6), (13, 2), (45, 17), (200, 3)):
+        scene = Detonation(width, height, "192.168.1.50")
+        for t in MOMENTS:
+            lines = scene.render(t).plain.split("\n")
+            assert len(lines) == height and {len(line) for line in lines} == {width}
 
 
 def test_a_console_with_no_alternate_screen_gets_a_frame_that_cannot_scroll():
