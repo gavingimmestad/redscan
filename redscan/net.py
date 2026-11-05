@@ -229,6 +229,46 @@ class PingStats:
         return sum(deltas) / len(deltas)
 
 
+OFFLINE_AFTER = 3  # unanswered pings in a row before a host counts as offline
+
+
+@dataclass(slots=True)
+class OutageWatch:
+    """Decides when a target that *was* answering has actually gone offline.
+
+    One lost ping is weather, so it takes several in a row. And a target that has
+    never answered has not gone anywhere: far more often than not that is a
+    firewall eating ICMP, not an outage.
+    """
+
+    threshold: int = OFFLINE_AFTER
+    seen_alive: bool = False
+    misses: int = 0
+    down: bool = False
+    since: float = 0.0
+
+    def observe(self, pong: Pong) -> str | None:
+        """Feed in one reply. Returns "offline" or "online" as the state flips."""
+        if pong.alive:
+            recovered = self.down
+            self.seen_alive, self.misses, self.down = True, 0, False
+            return "online" if recovered else None
+        if not self.seen_alive or self.down:
+            return None
+        if self.misses == 0:
+            self.since = time.perf_counter()
+        self.misses += 1
+        if self.misses < self.threshold:
+            return None
+        self.down = True
+        return "offline"
+
+    @property
+    def downtime(self) -> float:
+        """Seconds since the first unanswered ping of the current outage."""
+        return time.perf_counter() - self.since
+
+
 # --- Port scanning ------------------------------------------------------------
 
 @dataclass(slots=True)

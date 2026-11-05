@@ -22,6 +22,7 @@ from rich.text import Text
 from . import __version__
 from .banner import hero, logo_text
 from .net import (
+    OutageWatch,
     PingStats,
     Pong,
     Target,
@@ -32,6 +33,7 @@ from .net import (
     scan_ports,
     tcp_ping,
 )
+from .nuke import can_play, detonate
 from .theme import (
     DEFAULT_PALETTE,
     PALETTES,
@@ -58,6 +60,10 @@ from .ui import (
 )
 
 PSYCHEDELIC = sorted(name for name, p in PALETTES.items() if p.psychedelic)
+
+# What `--nuke` drops the warhead on when not given a target. A documentation
+# address (RFC 5737), so a preview can never look like a statement about a real host.
+DEMO_TARGET = "203.0.113.7"
 
 MENU = [
     ("1", "Quick scan", "the 88 ports that matter, plus banner grabbing"),
@@ -236,10 +242,13 @@ def do_scan(console: Console, target: Target, ports: list[int], workers: int,
 
 
 def do_ping(console: Console, target: Target, count: int, interval: float,
-            timeout_ms: int, port: int | None = None) -> tuple[PingStats, list[Pong]]:
+            timeout_ms: int, port: int | None = None,
+            animate: bool = True) -> tuple[PingStats, list[Pong]]:
     """Ping in a loop behind the live monitor. ``count <= 0`` runs forever."""
     stats = PingStats()
     history: list[Pong] = []
+    watch = OutageWatch()
+    label = f"{target.ip}:{port}" if port else target.ip
     endless = count <= 0
     if endless:
         notice(console, "continuous mode - press Ctrl+C to stop", "rs.warn")
@@ -255,6 +264,15 @@ def do_ping(console: Console, target: Target, count: int, interval: float,
                 stats.add(pong)
                 history.append(pong)
                 live.update(ping_panel(target, stats, history, console.width))
+                event = watch.observe(pong)
+                if event == "offline":
+                    notice(console, f"{label} went offline: "
+                                    f"{watch.misses} pings in a row unanswered", "rs.bad")
+                    if animate and can_play(console):
+                        _detonate_behind(live, console, label)
+                        live.update(ping_panel(target, stats, history, console.width))
+                elif event == "online":
+                    notice(console, f"{label} is back after {watch.downtime:.0f}s", "rs.good")
                 if endless or seq < count:
                     _wait(live, target, stats, history, console, interval)
     except KeyboardInterrupt:
@@ -262,6 +280,23 @@ def do_ping(console: Console, target: Target, count: int, interval: float,
 
     console.print(ping_summary(target, stats, history))
     return stats, history
+
+
+def _detonate_behind(live: Live, console: Console, label: str) -> None:
+    """Hand the terminal to the detonation, then put the dashboard back.
+
+    Rich only allows one display at a time, so the dashboard has to stop first.
+    ``stop()`` redraws once more and remembers how tall that was, and ``start()``
+    then erases that many lines, so the display is blanked beforehand or the
+    panels above it would be eaten on the way back.
+    """
+    live.update(Text(""))
+    live.stop()
+    try:
+        detonate(console, label)
+    finally:
+        live.vertical_overflow = "ellipsis"  # stop() leaves it on "visible"
+        live.start()
 
 
 def _wait(live: Live, target: Target, stats: PingStats, history: list[Pong],
@@ -438,7 +473,8 @@ def interactive(console: Console, args: argparse.Namespace) -> int:
 
         if choice in {"4", "6"}:
             count = 0 if choice == "4" else 4
-            do_ping(console, target, count, args.interval, args.timeout_ms)
+            do_ping(console, target, count, args.interval, args.timeout_ms,
+                    animate=not args.no_anim)
         if choice == "5":
             port_text = ask(console, "tcp port to ping", "443")
             try:
@@ -447,7 +483,7 @@ def interactive(console: Console, args: argparse.Namespace) -> int:
                 notice(console, f"not a port: {port_text!r}", "rs.bad")
                 continue
             do_ping(console, target, args.count or 4, args.interval,
-                    args.timeout_ms, port=tcp_port)
+                    args.timeout_ms, port=tcp_port, animate=not args.no_anim)
 
         if ports:
             view = do_scan(console, target, ports, args.workers,
@@ -487,7 +523,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-banner", action="store_true",
                         help="skip service banner grabbing")
     parser.add_argument("--no-anim", action="store_true",
-                        help="skip the startup animation")
+                        help="skip the startup and detonation animations")
+    parser.add_argument("--nuke", action="store_true",
+                        help="preview what happens when a target goes offline, then exit")
 
     colour = parser.add_argument_group("colour")
     colour.add_argument("--palette", choices=sorted(PALETTES), metavar="NAME",
@@ -518,6 +556,13 @@ def main(argv: list[str] | None = None) -> int:
         console.print(palette_gallery())
         return 0
 
+    if args.nuke:
+        if not can_play(console):
+            notice(console, "this terminal is too small or not interactive", "rs.warn")
+            return 1
+        detonate(console, args.target or DEMO_TARGET)
+        return 0
+
     boot(console, animate=not args.no_anim)
 
     try:
@@ -535,7 +580,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.ping or args.ping_only or args.tcp_ping:
             do_ping(console, target, args.count, args.interval, args.timeout_ms,
-                    port=args.tcp_ping)
+                    port=args.tcp_ping, animate=not args.no_anim)
         if args.ping_only:
             return 0
 
