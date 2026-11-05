@@ -224,18 +224,23 @@ def do_scan(console: Console, target: Target, ports: list[int], workers: int,
     # frames. A still one only redraws when something actually changed.
     idle_redraw = 0.05 if is_tripping() else 0.07
 
-    with Live(view.render(progress, console.width), console=console,
-              refresh_per_second=15, transient=True) as live:
-        for result in scan_ports(target.ip, ports, workers=workers,
-                                 timeout=timeout, grab=grab):
-            view.record(result)
-            progress.advance(task)
-            now = time.perf_counter()
-            # Redrawing on every one of 65k results would out-run the terminal.
-            if result.is_open or now - last_draw > idle_redraw:
-                live.update(view.render(progress, console.width))
-                last_draw = now
-        live.update(view.render(progress, console.width))
+    results = scan_ports(target.ip, ports, workers=workers, timeout=timeout, grab=grab)
+    try:
+        with Live(view.render(progress, console.width), console=console,
+                  refresh_per_second=15, transient=True) as live:
+            for result in results:
+                view.record(result)
+                progress.advance(task)
+                now = time.perf_counter()
+                # Redrawing on every one of 65k results would out-run the terminal.
+                if result.is_open or now - last_draw > idle_redraw:
+                    live.update(view.render(progress, console.width))
+                    last_draw = now
+            live.update(view.render(progress, console.width))
+    except KeyboardInterrupt:
+        notice(console, "interrupted", "rs.warn")
+    finally:
+        results.close()
 
     console.print(scan_summary(target, view))
     return view
@@ -556,16 +561,16 @@ def main(argv: list[str] | None = None) -> int:
         console.print(palette_gallery())
         return 0
 
-    if args.nuke:
-        if not can_play(console):
-            notice(console, "this terminal is too small or not interactive", "rs.warn")
-            return 1
-        detonate(console, args.target or DEMO_TARGET)
-        return 0
-
-    boot(console, animate=not args.no_anim)
-
     try:
+        if args.nuke:
+            if not can_play(console):
+                notice(console, "this terminal is too small or not interactive", "rs.warn")
+                return 1
+            detonate(console, args.target or DEMO_TARGET)
+            return 0
+
+        boot(console, animate=not args.no_anim)
+
         if args.net_info:
             do_network_info(console)
             return 0
@@ -593,7 +598,7 @@ def main(argv: list[str] | None = None) -> int:
         view = do_scan(console, target, ports, args.workers, args.timeout,
                        not args.no_banner)
         export_results(console, target, view, args.json, args.csv)
-        return 0
+        return 130 if view.done < view.total else 0
     except KeyboardInterrupt:
         notice(console, "aborted", "rs.warn")
         return 130

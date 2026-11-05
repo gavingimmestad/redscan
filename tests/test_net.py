@@ -115,3 +115,35 @@ def test_tcp_ping_says_refused_plainly_and_quickly():
     pong = net.tcp_ping("127.0.0.1", free_port())
     assert not pong.alive and pong.error == "refused"
     assert time.perf_counter() - started < 0.5
+
+
+# --- Scanning -----------------------------------------------------------------
+
+def test_a_scan_reports_every_port_exactly_once():
+    with service(b"x") as open_port:
+        closed = free_port()
+        results = list(net.scan_ports("127.0.0.1", [open_port, closed], workers=4, timeout=0.5))
+    assert {r.port: r.state for r in results} == {open_port: "open", closed: "closed"}
+
+
+def test_an_empty_port_list_scans_nothing():
+    assert list(net.scan_ports("127.0.0.1", [])) == []
+
+
+def test_abandoning_a_scan_does_not_wait_for_the_queue(monkeypatch):
+    """This is Ctrl+C on a full sweep, which used to sit there finishing the scan."""
+    ran = []
+
+    def slow_probe(ip, port, timeout, grab):
+        ran.append(port)
+        time.sleep(0.02)
+        return net.PortResult(port, "filtered", "x")
+
+    monkeypatch.setattr(net, "probe_port", slow_probe)
+    scan = net.scan_ports("127.0.0.1", range(1, 5001), workers=2)
+    next(scan)
+    started = time.perf_counter()
+    scan.close()
+    assert time.perf_counter() - started < 0.5
+    time.sleep(0.1)
+    assert len(ran) < 100

@@ -386,11 +386,15 @@ def scan_ports(ip: str, ports: Iterable[int], workers: int = 400,
     ports = list(ports)
     if not ports:
         return
-    pool_size = max(1, min(workers, len(ports)))
-    with ThreadPoolExecutor(max_workers=pool_size) as pool:
+    pool = ThreadPoolExecutor(max_workers=max(1, min(workers, len(ports))))
+    try:
         futures = [pool.submit(probe_port, ip, p, timeout, grab) for p in ports]
         for future in as_completed(futures):
             yield future.result()
+    finally:
+        # Abandoned early, drop the queue. Waiting for it here is what used to leave
+        # Ctrl+C sitting for minutes on a full sweep, finishing the scan it was stopping.
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def parse_ports(spec: str) -> list[int]:

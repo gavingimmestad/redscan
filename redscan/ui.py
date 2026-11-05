@@ -419,11 +419,13 @@ def ping_panel(target: Target, stats: PingStats, history: list[Pong],
 def scan_summary(target: Target, view: ScanView) -> RenderableType:
     """The after-action report."""
     open_ports = sorted(view.open_ports, key=lambda r: r.port)
-    verdict = (
-        heading(f"{len(open_ports)} OPEN PORT{'S' if len(open_ports) != 1 else ''} FOUND")
-        if open_ports
-        else Text("NO OPEN PORTS - the host is quiet or shielded", style="rs.muted")
-    )
+    finished = view.done >= view.total
+    if open_ports:
+        verdict = heading(f"{len(open_ports)} OPEN PORT{'S' if len(open_ports) != 1 else ''} FOUND")
+    elif finished:
+        verdict = Text("NO OPEN PORTS - the host is quiet or shielded", style="rs.muted")
+    else:
+        verdict = Text("NO OPEN PORTS SO FAR - the scan was cut short", style="rs.warn")
     rows: list[tuple[str, RenderableType]] = [
         ("target", Text(target.label, style=f"bold {role('bright')}")),
         ("ports probed", Text(f"{view.done:,} of {view.total:,}", style="rs.value")),
@@ -444,8 +446,8 @@ def scan_summary(target: Target, view: ScanView) -> RenderableType:
             Rule(style="rs.rule"),
             port_table(open_ports, limit=100),
         ])
-    return frame(Group(*pieces), "SCAN COMPLETE", box_style=box.DOUBLE,
-                 padding=(1, 2))
+    return frame(Group(*pieces), "SCAN COMPLETE" if finished else "SCAN INTERRUPTED",
+                 box_style=box.DOUBLE, padding=(1, 2))
 
 
 def ping_summary(target: Target, stats: PingStats, history: list[Pong]) -> RenderableType:

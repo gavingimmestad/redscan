@@ -8,6 +8,10 @@ import pytest
 from rich.console import Console
 
 from redscan import cli, theme
+from redscan.net import PortResult, Target
+from redscan.ui import ScanView
+
+TARGET = Target(raw="10.0.0.5", ip="10.0.0.5")
 
 
 @pytest.fixture(autouse=True)
@@ -271,3 +275,65 @@ def test_boot_animation_runs_and_is_bounded(monkeypatch):
     cli.boot(make_console(100), animate=True)
     assert slept
     assert sum(slept) < 4.0
+
+
+# --- Ctrl+C -------------------------------------------------------------------
+
+def interrupted_scan(ip, ports, workers=0, timeout=0.0, grab=True):
+    yield PortResult(22, "open", "ssh", 1.0, "SSH-2.0-x")
+    raise KeyboardInterrupt
+
+
+def test_ctrl_c_during_a_scan_keeps_what_it_found(monkeypatch):
+    monkeypatch.setattr(cli, "scan_ports", interrupted_scan)
+    console = make_console(120)
+    view = cli.do_scan(console, TARGET, [22, 80, 443], 10, 0.1, True)
+    text = console.export_text()
+    assert (view.done, view.total) == (1, 3)
+    assert "interrupted" in text
+    assert "SCAN INTERRUPTED" in text and "SSH-2.0-x" in text and "1 of 3" in text
+
+
+def test_ctrl_c_with_nothing_found_does_not_claim_the_host_is_quiet(monkeypatch):
+    def nothing_yet(ip, ports, workers=0, timeout=0.0, grab=True):
+        yield PortResult(80, "filtered", "http")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "scan_ports", nothing_yet)
+    console = make_console(120)
+    cli.do_scan(console, TARGET, [80, 81], 10, 0.1, True)
+    text = console.export_text()
+    assert "cut short" in text and "quiet or shielded" not in text
+
+
+def test_a_finished_scan_is_still_called_complete(monkeypatch):
+    def complete(ip, ports, workers=0, timeout=0.0, grab=True):
+        yield PortResult(80, "closed", "http")
+
+    monkeypatch.setattr(cli, "scan_ports", complete)
+    console = make_console(120)
+    cli.do_scan(console, TARGET, [80], 10, 0.1, True)
+    assert "SCAN COMPLETE" in console.export_text()
+
+
+def test_an_interrupted_scan_says_so_in_its_exit_code(monkeypatch):
+    partial = ScanView(target=TARGET, total=3)
+    partial.record(PortResult(22, "open", "ssh", 1.0))
+    monkeypatch.setattr(cli, "build_console", lambda palette="red": make_console(120))
+    monkeypatch.setattr(cli, "boot", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "resolve_or_report", lambda console, host: TARGET)
+    monkeypatch.setattr(cli, "do_scan", lambda *a, **k: partial)
+    assert cli.main(["10.0.0.5", "-p", "22,80,443"]) == 130
+
+
+@pytest.mark.parametrize("hook,argv", [("boot", ["--net-info"]), ("detonate", ["--nuke"])])
+def test_ctrl_c_in_an_animation_exits_cleanly_with_no_traceback(monkeypatch, hook, argv):
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    console = make_console(120)
+    monkeypatch.setattr(cli, "build_console", lambda palette="red": console)
+    monkeypatch.setattr(cli, "can_play", lambda console: True)
+    monkeypatch.setattr(cli, hook, interrupt)
+    assert cli.main(argv) == 130
+    assert "aborted" in console.export_text()
