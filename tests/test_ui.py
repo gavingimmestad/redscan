@@ -78,7 +78,10 @@ def test_live_border_animates_when_tripping():
     assert ui.live_border().startswith("bold #")
 
 
-def test_live_border_offset_staggers_neighbouring_panels():
+def test_live_border_offset_staggers_neighbouring_panels(monkeypatch):
+    # Pinned, because half a cycle apart the two pulses coincide each time the wave
+    # crosses its midpoint, so on the real clock this failed now and then.
+    monkeypatch.setattr(theme, "clock", lambda: 1.0)
     theme.set_palette("acid")
     assert ui.live_border(0.0) != ui.live_border(0.5)
 

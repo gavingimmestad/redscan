@@ -159,7 +159,9 @@ def test_heat_stops_drops_the_void_stop():
     assert theme.heat_stops(palette) == list(palette.stops[1:])
 
 
-def test_banner_stops_are_a_subset_of_the_heat_ramp():
+def test_banner_stops_are_a_subset_of_the_heat_ramp(monkeypatch):
+    # Pinned, because kaleido's hues rotate between the two reads below.
+    monkeypatch.setattr(theme, "clock", lambda: 1.0)
     stops = theme.banner_stops(theme.PALETTES["kaleido"])
     assert stops
     assert set(stops) <= set(theme.heat_stops(theme.PALETTES["kaleido"]))
