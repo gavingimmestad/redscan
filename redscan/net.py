@@ -98,16 +98,31 @@ def resolve(host: str) -> Target:
         ip = socket.gethostbyname(host)
     except socket.gaierror as exc:
         raise ValueError(f"could not resolve {host!r}: {exc.strerror or exc}") from exc
+    except UnicodeError as exc:  # empty or over-long labels fail in the idna codec
+        raise ValueError(f"could not resolve {host!r}: not a valid hostname") from exc
 
-    target = Target(raw=host, ip=ip, hostname=None if host == ip else host)
-    try:
-        socket.setdefaulttimeout(1.5)
-        target.reverse = socket.gethostbyaddr(ip)[0]
-    except (OSError, socket.herror):
-        target.reverse = None
-    finally:
-        socket.setdefaulttimeout(None)
-    return target
+    return Target(raw=host, ip=ip, hostname=None if host == ip else host,
+                  reverse=_reverse_dns(ip))
+
+
+def _reverse_dns(ip: str, deadline: float = 1.5) -> str | None:
+    """The PTR name for an address, if it turns up in time.
+
+    gethostbyaddr ignores socket timeouts and can sit for several seconds on an address
+    with no PTR record, so a deadline has to come from outside the call.
+    """
+    found: list[str] = []
+
+    def look_up() -> None:
+        try:
+            found.append(socket.gethostbyaddr(ip)[0])
+        except OSError:
+            pass
+
+    worker = threading.Thread(target=look_up, daemon=True)
+    worker.start()
+    worker.join(deadline)
+    return found[0] if found else None
 
 
 # --- Pinging ------------------------------------------------------------------
@@ -126,7 +141,9 @@ class Pong:
         return self.latency_ms is not None
 
 
-_WIN_TIME = re.compile(r"time[=<]\s*(\d+)\s*ms", re.IGNORECASE)
+# Windows translates everything here but "TTL=": Zeit=12ms, temps=12 ms, \u0432\u0440\u0435\u043c\u044f=12\u043c\u0441.
+# So take the number right before the TTL, not the one after a word meaning "time".
+_WIN_TIME = re.compile(r"[=<]\s*(\d+)\s*[^\s=<]*\s+TTL=", re.IGNORECASE)
 _NIX_TIME = re.compile(r"time\s*[=<]\s*([\d.]+)\s*ms", re.IGNORECASE)
 _TTL = re.compile(r"ttl[=:]\s*(\d+)", re.IGNORECASE)
 
@@ -149,6 +166,7 @@ def icmp_ping(ip: str, seq: int = 0, timeout_ms: int = 1200) -> Pong:
             _ping_command(ip, timeout_ms),
             capture_output=True,
             text=True,
+            errors="replace",  # ping writes in the console's code page, not ours
             timeout=max(timeout_ms / 1000 + 2, 3),
             creationflags=_NO_WINDOW,
         )
@@ -158,11 +176,13 @@ def icmp_ping(ip: str, seq: int = 0, timeout_ms: int = 1200) -> Pong:
         return Pong(seq, None, error=str(exc))
 
     out = f"{proc.stdout}\n{proc.stderr}"
-    lowered = out.lower()
     ttl_match = _TTL.search(out)
     ttl = int(ttl_match.group(1)) if ttl_match else None
 
-    if proc.returncode != 0 or "unreachable" in lowered or "100% packet loss" in lowered:
+    # Only a real echo reply carries a TTL, in every language ping speaks. Windows exits
+    # 0 on "Destination host unreachable", and that sentence is translated too, so on a
+    # German machine a dead host looked alive and the offline alarm could never fire.
+    if proc.returncode != 0 or ttl_match is None:
         return Pong(seq, None, ttl=ttl, error="no reply")
 
     match = _WIN_TIME.search(out) if IS_WINDOWS else _NIX_TIME.search(out)

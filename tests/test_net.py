@@ -147,3 +147,146 @@ def test_abandoning_a_scan_does_not_wait_for_the_queue(monkeypatch):
     assert time.perf_counter() - started < 0.5
     time.sleep(0.1)
     assert len(ran) < 100
+
+
+# --- Reading ping's output ----------------------------------------------------
+
+def canned_ping(monkeypatch, output: str, code: int = 0, windows: bool = True) -> dict:
+    monkeypatch.setattr(net, "IS_WINDOWS", windows)
+    captured: dict = {}
+
+    def run(command, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, code, output, "")
+
+    monkeypatch.setattr(net.subprocess, "run", run)
+    return captured
+
+
+@pytest.mark.parametrize("line,latency,ttl", [
+    ("Reply from 8.8.8.8: bytes=32 time=12ms TTL=117", 12.0, 117),
+    ("Reply from 127.0.0.1: bytes=32 time<1ms TTL=128", 1.0, 128),
+    ("Antwort von 8.8.8.8: Bytes=32 Zeit=12ms TTL=117", 12.0, 117),
+    ("R\u00e9ponse de 8.8.8.8\u00a0: octets=32 temps=12 ms TTL=117", 12.0, 117),
+    ("Respuesta desde 8.8.8.8: bytes=32 tiempo=12ms TTL=117", 12.0, 117),
+    ("\u041e\u0442\u0432\u0435\u0442 \u043e\u0442 8.8.8.8: \u0447\u0438\u0441\u043b\u043e \u0431\u0430\u0439\u0442=32 \u0432\u0440\u0435\u043c\u044f=12\u043c\u0441 TTL=117", 12.0, 117),
+    ("\u6765\u81ea 8.8.8.8 \u7684\u56de\u590d: \u5b57\u8282=32 \u65f6\u95f4=12ms TTL=117", 12.0, 117),
+])
+def test_a_windows_reply_is_read_in_any_language(monkeypatch, line, latency, ttl):
+    canned_ping(monkeypatch, f"\nPinging 8.8.8.8 with 32 bytes of data:\n{line}\n")
+    pong = net.icmp_ping("8.8.8.8", seq=3)
+    assert (pong.alive, pong.latency_ms, pong.ttl, pong.seq) == (True, latency, ttl, 3)
+
+
+@pytest.mark.parametrize("line", [
+    "Reply from 10.0.0.1: Destination host unreachable.",
+    "Antwort von 10.0.0.1: Zielhost nicht erreichbar.",
+    "R\u00e9ponse de 10.0.0.1\u00a0: H\u00f4te de destination inaccessible.",
+    "Reply from 10.0.0.1: TTL expired in transit.",
+])
+def test_windows_exit_zero_without_an_echo_reply_is_not_alive(monkeypatch, line):
+    """Windows exits 0 on these, and they are translated. Only the TTL can be trusted."""
+    canned_ping(monkeypatch, line, code=0)
+    assert not net.icmp_ping("10.0.0.1").alive
+
+
+def test_a_timed_out_ping_is_not_alive(monkeypatch):
+    canned_ping(monkeypatch, "Request timed out.\n", code=1)
+    pong = net.icmp_ping("10.0.0.1")
+    assert not pong.alive and pong.error == "no reply"
+
+
+def test_a_linux_reply_is_read(monkeypatch):
+    canned_ping(monkeypatch, "64 bytes from 8.8.8.8: icmp_seq=1 ttl=117 time=12.3 ms\n\n"
+                             "1 packets transmitted, 1 received, 0% packet loss\n", windows=False)
+    pong = net.icmp_ping("8.8.8.8")
+    assert (pong.latency_ms, pong.ttl) == (12.3, 117)
+
+
+def test_a_linux_host_that_stays_silent_is_not_alive(monkeypatch):
+    canned_ping(monkeypatch, "1 packets transmitted, 0 received, 100% packet loss\n",
+                code=1, windows=False)
+    assert not net.icmp_ping("8.8.8.8").alive
+
+
+def test_undecodable_ping_output_cannot_fail_the_reply(monkeypatch):
+    assert canned_ping(monkeypatch, "x TTL=5")  is not None
+    captured = canned_ping(monkeypatch, "Reply: bytes=32 time=1ms TTL=5")
+    net.icmp_ping("8.8.8.8")
+    assert captured["errors"] == "replace"
+
+
+def test_the_real_ping_binary_reaches_loopback():
+    pong = net.icmp_ping("127.0.0.1", timeout_ms=2000)
+    assert pong.alive and pong.ttl
+
+
+# --- Names --------------------------------------------------------------------
+
+def test_an_address_resolves_to_itself():
+    target = net.resolve("127.0.0.1")
+    assert target.ip == "127.0.0.1" and target.hostname is None and target.is_private
+
+
+def test_a_name_is_kept_alongside_its_address():
+    target = net.resolve("localhost")
+    assert target.ip == "127.0.0.1" and target.hostname == "localhost"
+
+
+@pytest.mark.parametrize("host", ["", "   ", "a..b", "a" * 70 + ".com", "does-not-exist.invalid"])
+def test_a_bad_name_is_a_readable_error(host):
+    with pytest.raises(ValueError):
+        net.resolve(host)
+
+
+def test_a_slow_reverse_lookup_cannot_hold_up_the_start(monkeypatch):
+    """gethostbyaddr ignores socket timeouts: this sat for 5s on any address with no PTR."""
+    monkeypatch.setattr(net.socket, "gethostbyaddr", lambda ip: time.sleep(10))
+    started = time.perf_counter()
+    assert net._reverse_dns("10.0.0.5", deadline=0.1) is None
+    assert time.perf_counter() - started < 1.0
+
+
+def test_a_failed_reverse_lookup_is_just_no_name(monkeypatch):
+    def nope(ip):
+        raise socket.herror(1, "not found")
+
+    monkeypatch.setattr(net.socket, "gethostbyaddr", nope)
+    assert net._reverse_dns("10.0.0.5") is None
+
+
+# --- Port specs and the OS guess ----------------------------------------------
+
+@pytest.mark.parametrize("spec,expected", [
+    ("22", [22]),
+    ("22,80,443", [22, 80, 443]),
+    ("80,22,80", [22, 80]),
+    ("1-3", [1, 2, 3]),
+    ("3-1", [1, 2, 3]),
+    ("22 80", [22, 80]),
+    ("1-2,5", [1, 2, 5]),
+])
+def test_port_specs_parse(spec, expected):
+    assert net.parse_ports(spec) == expected
+
+
+def test_top_and_full_are_what_they_say():
+    assert net.parse_ports("top") == list(net.TOP_PORTS) and len(net.TOP_PORTS) == 88
+    assert net.parse_ports("") == list(net.TOP_PORTS)
+    assert net.parse_ports("full") == list(range(1, 65536))
+    assert 22 in net.parse_ports("top,60000") and 60000 in net.parse_ports("top,60000")
+
+
+@pytest.mark.parametrize("spec", ["abc", "0", "65536", "70000", "1-70000", "0-5", "5-", "-5", "1-2-3"])
+def test_impossible_port_specs_are_refused(spec):
+    with pytest.raises(ValueError):
+        net.parse_ports(spec)
+
+
+@pytest.mark.parametrize("ttl,expected", [
+    (None, "unknown"), (64, "Linux / Unix, ~0 hops away"), (63, "Linux / Unix, ~1 hop away"),
+    (128, "Windows, ~0 hops away"), (117, "Windows, ~11 hops away"),
+    (255, "network gear, ~0 hops away"),
+])
+def test_the_os_guess(ttl, expected):
+    assert net.guess_os(ttl) == expected
