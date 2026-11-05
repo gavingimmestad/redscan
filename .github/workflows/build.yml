@@ -22,6 +22,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
+      - name: Run the tests
+        run: python -m pytest -q
+
       - name: Smoke test (source)
         run: python run_redscan.py 127.0.0.1 -p 135,445 --no-anim
 

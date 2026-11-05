@@ -7,11 +7,12 @@
 <p align="center">
   <strong>An unreasonably good looking port scanner and IP pinger for the terminal.</strong><br>
   Live radar sweep, plasma-lit banner, banner grabbing, latency sparklines —
-  in angry red, or in five palettes that will not sit still.
+  in angry red, or in five palettes that will not sit still.<br>
+  And when a host goes offline, a warhead falls out of the sky.
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.0.0-E8102B?style=for-the-badge&labelColor=2B0509">
+  <img alt="version" src="https://img.shields.io/badge/version-1.1.0-E8102B?style=for-the-badge&labelColor=2B0509">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-C81E3A?style=for-the-badge&labelColor=2B0509">
   <img alt="platform" src="https://img.shields.io/badge/windows%20%7C%20linux%20%7C%20macos-FF3B2E?style=for-the-badge&labelColor=2B0509">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-8B0000?style=for-the-badge&labelColor=2B0509">
@@ -24,6 +25,11 @@
 
 <p align="center">
   <img src="assets/screenshot.png" alt="RedScan sweeping all 65,535 ports with the live dashboard" width="760">
+</p>
+
+<p align="center">
+  <img src="assets/nuke.gif" alt="An ASCII warhead drops out of a cloud deck onto a host, then a shockwave and a mushroom cloud, ending on the word OFFLINE" width="760"><br>
+  <em>What the ping monitor does when a target stops answering. Every glyph is ASCII.</em>
 </p>
 
 ```
@@ -59,6 +65,7 @@ palette whose hues rotate while you watch.
 | **No admin needed** | No raw sockets anywhere — ICMP goes through the system `ping`, everything else is a plain TCP connect |
 | **Exports** | `--json` and `--csv` for when the pretty version has to become a ticket |
 | **Interactive menu** | Double-click the `.exe` and it asks what you want instead of printing usage and vanishing |
+| **Offline alarm** | When a host that was answering stops, a warhead drops out of the clouds: one white-out, a shockwave that flattens the skyline, a mushroom cloud, fallout. Computed fresh in pure ASCII, scaled to your terminal and painted in your palette |
 | **Six palettes** | Red by default. `--trip` picks one of five psychedelic ones, where the banner is lit by a moving plasma field, the radar grows three comet heads, borders breathe and every hue rotates in real time |
 
 ## Install
@@ -102,9 +109,26 @@ redscan 10.0.0.5 --tcp-ping 443     # latency to one port, no ICMP
 redscan scanme.nmap.org --json out.json --csv ports.csv
 redscan --net-info                  # this machine's addresses
 redscan --trip 192.168.1.1          # same scan, considerably less red
+redscan --nuke                      # preview what happens when a target goes offline
 redscan --palette vapor             # pick a specific palette
 redscan --list-palettes             # see them all first
 ```
+
+### When a target goes offline
+
+The ping monitor drops a warhead on any target that goes dark, and logs a line
+saying when, and another when it comes back. It tries not to cry wolf:
+
+- It takes **three unanswered pings in a row**. One lost packet is weather.
+- The target must have **answered at least once**. A host that never replied has
+  not gone anywhere; more often than not that is a firewall eating ICMP.
+- Each outage gets **one detonation**, and the alarm re-arms when the host returns.
+
+It plays on the alternate screen, so your scrollback is untouched and the dashboard
+comes straight back, and the flash fades out once rather than strobing. `--no-anim`
+keeps the log lines and skips the show, as does piping the output somewhere. To see
+it without taking anything down, run `redscan --nuke`, with `--trip` if you want it
+in colours no explosion has ever been.
 
 ### Palettes
 
@@ -140,7 +164,8 @@ heights, counts and progress mean exactly the same thing in every one of them.
 | `-t, --timeout` | Per-port connect timeout in seconds (default `0.6`) |
 | `--timeout-ms` | Ping timeout in milliseconds (default `1200`) |
 | `--no-banner` | Skip banner grabbing (faster, quieter) |
-| `--no-anim` | Skip the startup animation |
+| `--no-anim` | Skip the startup and detonation animations |
+| `--nuke` | Preview the offline alarm and exit; touches no network |
 | `--palette NAME` | `red`, `acid`, `vapor`, `oil`, `ultra` or `kaleido` |
 | `--trip` | Pick a random psychedelic palette |
 | `--list-palettes` | Show every palette and exit |
@@ -191,12 +216,14 @@ redscan/
 ├── redscan/
 │   ├── theme.py     palettes, hue spin, gradients, plasma, Rich theme
 │   ├── banner.py    the oversized logo, the radar sweep, the ripple rule
+│   ├── nuke.py      the offline alarm: warhead, shockwave, mushroom cloud
 │   ├── net.py       resolution, ICMP/TCP ping, threaded scanning
 │   ├── ui.py        every panel, table, sparkline and stat tile
 │   └── cli.py       arguments, palette selection, interactive menu, exports
-├── tests/           212 tests, run against a still and a moving palette
+├── tests/           263 tests, run against a still and a moving palette
 ├── tools/
-│   └── make_icon.py renders assets/redscan.ico with no image libraries
+│   ├── make_icon.py renders assets/redscan.ico with no image libraries
+│   └── make_demo.py renders the detonation to assets/nuke.gif, no terminal needed
 ├── run_redscan.py   PyInstaller entry point
 ├── build.ps1        one-file Windows build
 └── .github/workflows/build.yml   CI build, v* tags publish a release
