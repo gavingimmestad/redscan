@@ -337,3 +337,91 @@ def test_ctrl_c_in_an_animation_exits_cleanly_with_no_traceback(monkeypatch, hoo
     monkeypatch.setattr(cli, hook, interrupt)
     assert cli.main(argv) == 130
     assert "aborted" in console.export_text()
+
+
+# --- The menu when input stops ------------------------------------------------
+
+def feed(console, monkeypatch, *answers):
+    """Answer prompts in turn, then behave like a closed stdin."""
+    queue = iter(answers)
+
+    def fake_input(*args, **kwargs):
+        try:
+            answer = next(queue)
+        except StopIteration:
+            raise EOFError from None
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(console, "input", fake_input)
+
+
+def test_the_menu_leaves_when_input_ends(monkeypatch):
+    """It used to re-ask forever, flat out: 4 MB of menus in fifteen seconds."""
+    console = make_console(120)
+    feed(console, monkeypatch)
+    assert cli.interactive(console, parse()) == 0
+
+
+def test_ctrl_c_at_the_menu_leaves(monkeypatch):
+    console = make_console(120)
+    feed(console, monkeypatch, KeyboardInterrupt())
+    assert cli.interactive(console, parse()) == 0
+
+
+def test_enter_at_the_menu_still_means_the_default(monkeypatch):
+    console = make_console(120)
+    feed(console, monkeypatch, "", "")  # quick scan, then the host prompt ends input
+    seen = []
+    monkeypatch.setattr(cli, "resolve_or_report", lambda c, h: seen.append(h) or None)
+    assert cli.interactive(console, parse()) == 0
+    assert seen == ["127.0.0.1"]
+
+
+def test_input_ending_at_the_ports_prompt_does_not_start_a_scan(monkeypatch):
+    """An empty answer parses as 'top', so this used to launch the wrong scan."""
+    console = make_console(120)
+    feed(console, monkeypatch, "2", "127.0.0.1")
+    monkeypatch.setattr(cli, "resolve_or_report", lambda c, h: TARGET)
+    monkeypatch.setattr(cli, "do_scan", lambda *a, **k: pytest.fail("scanned"))
+    assert cli.interactive(console, parse()) == 0
+
+
+@pytest.mark.parametrize("answer", ["abc", "0", "-5", "65536", "99999"])
+def test_the_menu_refuses_an_impossible_tcp_port(monkeypatch, answer):
+    console = make_console(120)
+    feed(console, monkeypatch, "5", "127.0.0.1", answer)
+    monkeypatch.setattr(cli, "resolve_or_report", lambda c, h: TARGET)
+    monkeypatch.setattr(cli, "do_ping", lambda *a, **k: pytest.fail("pinged"))
+    assert cli.interactive(console, parse()) == 0
+    assert "not a port" in console.export_text()
+
+
+# --- Flags that cannot mean anything ------------------------------------------
+
+@pytest.mark.parametrize("argv", [
+    ["--tcp-ping", "0"], ["--tcp-ping", "-5"], ["--tcp-ping", "65536"], ["--tcp-ping", "abc"],
+    ["-i", "-1"], ["-i", "nan"], ["-i", "inf"], ["-i", "abc"],
+    ["-t", "0"], ["-t", "-1"], ["-t", "nan"], ["-t", "inf"], ["-t", "1e300"],
+    ["--timeout-ms", "0"], ["--timeout-ms", "-5"], ["--timeout-ms", "abc"],
+    ["-w", "0"], ["-w", "-5"], ["-w", "abc"],
+])
+def test_impossible_flag_values_are_refused_up_front(argv, capsys):
+    with pytest.raises(SystemExit) as stopped:
+        parse(*argv)
+    assert stopped.value.code == 2
+    assert "expected" in capsys.readouterr().err or "invalid" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv,attribute,value", [
+    (["-i", "0"], "interval", 0.0),
+    (["-i", "0.25"], "interval", 0.25),
+    (["-t", "0.05"], "timeout", 0.05),
+    (["-w", "1"], "workers", 1),
+    (["--timeout-ms", "1"], "timeout_ms", 1),
+    (["--tcp-ping", "65535"], "tcp_ping", 65535),
+    (["--tcp-ping", "1"], "tcp_ping", 1),
+])
+def test_sensible_flag_values_still_work(argv, attribute, value):
+    assert getattr(parse(*argv), attribute) == value

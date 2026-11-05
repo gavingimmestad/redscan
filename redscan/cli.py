@@ -78,6 +78,28 @@ MENU = [
 ]
 
 
+# --- Numbers from the outside world -------------------------------------------
+
+def _ranged(kind: type, low: float, high: float, what: str):
+    """An argparse type for a number in a range, with an error a person can read.
+
+    Without one, an impossible value got as far as the socket or the sleep before
+    surfacing as a traceback, or was quietly accepted and did something nonsensical.
+    """
+    def parse(text: str):
+        try:
+            value = kind(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"expected {what}, got {text!r}") from None
+        if not low <= value <= high:  # also catches nan, which fails every comparison
+            raise argparse.ArgumentTypeError(f"expected {what}, got {text}")
+        return value
+    return parse
+
+
+PORT_NUMBER = _ranged(int, 1, 65535, "a port from 1 to 65535")
+
+
 # --- Palette plumbing ---------------------------------------------------------
 
 _theme_depth = 0
@@ -434,7 +456,9 @@ def interactive(console: Console, args: argparse.Namespace) -> int:
         choice = ask(console, "selection", "1").lower()
         console.print()
 
-        if choice in {"q", "quit", "exit"}:
+        # Enter picks the default, so nothing back means Ctrl+C or the end of input.
+        # Treating that as a bad selection re-asked forever, flat out, on a closed stdin.
+        if not choice or choice in {"q", "quit", "exit"}:
             console.print(Align.center(heading("stay curious. stay authorised.")))
             console.print()
             return 0
@@ -465,6 +489,8 @@ def interactive(console: Console, args: argparse.Namespace) -> int:
             ports = parse_ports("top")
         elif choice == "2":
             spec = ask(console, "ports (e.g. 22,80,443 or 1-1024)", "1-1024")
+            if not spec:
+                continue
             try:
                 ports = parse_ports(spec)
             except ValueError as exc:
@@ -482,9 +508,11 @@ def interactive(console: Console, args: argparse.Namespace) -> int:
                     animate=not args.no_anim)
         if choice == "5":
             port_text = ask(console, "tcp port to ping", "443")
+            if not port_text:
+                continue
             try:
-                tcp_port = int(port_text)
-            except ValueError:
+                tcp_port = PORT_NUMBER(port_text)
+            except argparse.ArgumentTypeError:
                 notice(console, f"not a port: {port_text!r}", "rs.bad")
                 continue
             do_ping(console, target, args.count or 4, args.interval,
@@ -515,15 +543,19 @@ def build_parser() -> argparse.ArgumentParser:
                         help="ping and skip the port scan")
     parser.add_argument("-c", "--count", type=int, default=4,
                         help="ping count, 0 for continuous (default: 4)")
-    parser.add_argument("-i", "--interval", type=float, default=1.0,
+    parser.add_argument("-i", "--interval", default=1.0,
+                        type=_ranged(float, 0.0, 86400.0, "seconds, from 0 up to a day"),
                         help="seconds between pings (default: 1.0)")
-    parser.add_argument("--tcp-ping", type=int, metavar="PORT",
+    parser.add_argument("--tcp-ping", type=PORT_NUMBER, metavar="PORT",
                         help="measure latency to a TCP port instead of ICMP")
-    parser.add_argument("-w", "--workers", type=int, default=400,
+    parser.add_argument("-w", "--workers", default=400,
+                        type=_ranged(int, 1, 65535, "a worker count from 1 to 65535"),
                         help="concurrent socket workers (default: 400)")
-    parser.add_argument("-t", "--timeout", type=float, default=0.6,
+    parser.add_argument("-t", "--timeout", default=0.6,
+                        type=_ranged(float, 0.001, 3600.0, "seconds, from 0.001 up to an hour"),
                         help="per-port connect timeout in seconds (default: 0.6)")
-    parser.add_argument("--timeout-ms", type=int, default=1200,
+    parser.add_argument("--timeout-ms", default=1200,
+                        type=_ranged(int, 1, 3600000, "milliseconds, from 1 up to an hour"),
                         help="ping timeout in milliseconds (default: 1200)")
     parser.add_argument("--no-banner", action="store_true",
                         help="skip service banner grabbing")
