@@ -8,11 +8,12 @@
   <strong>An unreasonably good looking port scanner and IP pinger for the terminal.</strong><br>
   Live radar sweep, plasma-lit banner, banner grabbing, latency sparklines —
   in angry red, or in five palettes that will not sit still.<br>
-  And when a host goes offline, a warhead falls out of the sky.
+  And when a host goes offline, a warhead falls out of the sky.<br>
+  Then it audits what it found, mapped to MITRE ATT&CK and CWE.
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.1.0-E8102B?style=for-the-badge&labelColor=2B0509">
+  <img alt="version" src="https://img.shields.io/badge/version-1.2.0-E8102B?style=for-the-badge&labelColor=2B0509">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-C81E3A?style=for-the-badge&labelColor=2B0509">
   <img alt="platform" src="https://img.shields.io/badge/windows%20%7C%20linux%20%7C%20macos-FF3B2E?style=for-the-badge&labelColor=2B0509">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-8B0000?style=for-the-badge&labelColor=2B0509">
@@ -60,6 +61,10 @@ palette whose hues rotate while you watch.
 | **88 curated ports** | The ports that actually tell you something, named — `ssh`, `smb`, `redis`, `mongodb`, `plex`, `rabbitmq-ui` and friends |
 | **Full 65,535 sweep** | 400 concurrent socket workers by default, thousands of ports per second on a LAN |
 | **Banner grabbing** | Service fingerprints pulled straight off the socket, with a real `HEAD` request on HTTP-ish ports |
+| **Security audit** | Every open port is checked against 28 rules; each finding carries a severity, a MITRE ATT&CK technique, a CWE and a fix. Severity depends on scope: SMB on a LAN is `low`, SMB on the internet is `critical` |
+| **TLS inspection** | Protocol and cipher, certificate subject, issuer and expiry, chain trust, hostname match, and whether the server still accepts TLS 1.0/1.1 |
+| **HTTP header audit** | Missing HSTS, CSP, `X-Content-Type-Options` and clickjacking protection, cleartext HTTP with no redirect, version-leaking `Server` headers |
+| **CI gate** | `--fail-on high` exits 1 when a finding is that severe; `--sarif` writes SARIF 2.1.0 for code-scanning dashboards |
 | **Ping monitor** | Live ICMP latency with per-reply heat bars, a history sparkline, loss, jitter and a TTL-based OS guess |
 | **TCP ping** | Latency to a single port, for the many networks where ICMP is dropped on the floor |
 | **No admin needed** | No raw sockets anywhere — ICMP goes through the system `ping`, everything else is a plain TCP connect |
@@ -112,6 +117,7 @@ redscan --trip 192.168.1.1          # same scan, considerably less red
 redscan --nuke                      # preview what happens when a target goes offline
 redscan --palette vapor             # pick a specific palette
 redscan --list-palettes             # see them all first
+redscan 10.0.0.5 --fail-on high --sarif findings.sarif   # gate a pipeline
 ```
 
 ### When a target goes offline
@@ -169,7 +175,10 @@ heights, counts and progress mean exactly the same thing in every one of them.
 | `--palette NAME` | `red`, `acid`, `vapor`, `oil`, `ultra` or `kaleido` |
 | `--trip` | Pick a random psychedelic palette |
 | `--list-palettes` | Show every palette and exit |
-| `--json`, `--csv` | Write results to disk |
+| `--no-audit` | Skip the security audit (no TLS/HTTP probing of open ports) |
+| `--fail-on SEVERITY` | Exit `1` if any finding is `critical`, `high`, `medium`, `low` or `info` or worse |
+| `--json`, `--csv` | Write results to disk (JSON includes TLS details and findings) |
+| `--sarif` | Write findings as SARIF 2.1.0 |
 | `--net-info` | Show local addresses and exit |
 
 ### Reading the results
@@ -179,6 +188,27 @@ heights, counts and progress mean exactly the same thing in every one of them.
 | `OPEN` | The TCP handshake completed |
 | `closed` | The host actively refused — something is listening on that address, just not on that port |
 | `filtered` | Silence until timeout, which usually means a firewall dropped the packet |
+
+## Security audit
+
+<p align="center">
+  <img src="assets/audit.png" alt="RedScan audit of a deliberately misconfigured lab host" width="760">
+</p>
+
+<p align="center"><em>A deliberately misconfigured lab host on 127.0.0.1.</em></p>
+
+After the scan, RedScan inspects what answered and rules on it:
+
+- **Exposure rules** flag services that should not be reachable - Telnet, SMB, RDP,
+  databases, unauthenticated data stores, the Docker API and more.
+- **TLS** is checked with a verifying handshake against this machine's trust store,
+  then a second one capped at TLS 1.1 to catch deprecated protocols.
+- **HTTP** gets one `HEAD /` and its response headers are judged.
+
+It only talks to ports where TLS or HTTP is expected (web ports, implicit-TLS ports,
+anything that already answered in HTTP), so it never sends a handshake to something
+like a raw print server. Port rules go by the service that normally lives on a port:
+they report exposure, not confirmed vulnerabilities. STARTTLS services are not inspected.
 
 ## Build the executable yourself
 
@@ -217,10 +247,11 @@ redscan/
 │   ├── theme.py     palettes, hue spin, gradients, plasma, Rich theme
 │   ├── banner.py    the oversized logo, the radar sweep, the ripple rule
 │   ├── nuke.py      the offline alarm: warhead, shockwave, mushroom cloud
-│   ├── net.py       resolution, ICMP/TCP ping, threaded scanning
+│   ├── net.py       resolution, ICMP/TCP ping, threaded scanning, TLS/HTTP inspection
+│   ├── audit.py     exposure, TLS and HTTP rules mapped to ATT&CK and CWE
 │   ├── ui.py        every panel, table, sparkline and stat tile
 │   └── cli.py       arguments, palette selection, interactive menu, exports
-├── tests/           386 tests, including real sockets on loopback
+├── tests/           395 tests, including real sockets on loopback
 ├── tools/
 │   ├── make_icon.py renders assets/redscan.ico with no image libraries
 │   └── make_demo.py renders the detonation to assets/nuke.gif, no terminal needed

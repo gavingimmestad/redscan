@@ -14,3 +14,4 @@ dist/
 *.json
 *.csv
 !requirements*.txt
+*.sarif

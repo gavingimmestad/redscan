@@ -20,6 +20,7 @@ from rich.table import Table
 from rich.text import Text
 
 from . import __version__
+from .audit import SEVERITIES, Finding, analyze
 from .banner import hero, logo_text
 from .net import (
     OutageWatch,
@@ -27,6 +28,7 @@ from .net import (
     Pong,
     Target,
     icmp_ping,
+    inspect_ports,
     local_ip,
     parse_ports,
     resolve,
@@ -49,6 +51,7 @@ from .theme import (
 )
 from .ui import (
     ScanView,
+    audit_panel,
     frame,
     heading,
     make_progress,
@@ -66,7 +69,7 @@ PSYCHEDELIC = sorted(name for name, p in PALETTES.items() if p.psychedelic)
 DEMO_TARGET = "203.0.113.7"
 
 MENU = [
-    ("1", "Quick scan", "the 88 ports that matter, plus banner grabbing"),
+    ("1", "Quick scan", "the 88 ports that matter, banners and a security audit"),
     ("2", "Custom port scan", "pick your own ports or ranges"),
     ("3", "Full sweep", "all 65,535 TCP ports - bring a coffee"),
     ("4", "Ping monitor", "live ICMP latency, loss and jitter"),
@@ -268,6 +271,19 @@ def do_scan(console: Console, target: Target, ports: list[int], workers: int,
     return view
 
 
+def do_audit(console: Console, target: Target, view: ScanView) -> list[Finding]:
+    """Inspect whatever answered, then rule on it."""
+    if not view.open_ports or view.done < view.total:   # nothing found, or Ctrl+C
+        return []
+    with console.status(Text("auditing open ports: TLS, HTTP headers, exposure rules",
+                             style="rs.hot"),
+                        spinner="dots12", spinner_style="rs.spinner"):
+        inspect_ports(target, view.open_ports)
+    findings = analyze(target, view.open_ports)
+    console.print(audit_panel(view.open_ports, findings))
+    return findings
+
+
 def do_ping(console: Console, target: Target, count: int, interval: float,
             timeout_ms: int, port: int | None = None,
             animate: bool = True) -> tuple[PingStats, list[Pong]]:
@@ -378,8 +394,63 @@ def _spreadsheet_safe(cell: str) -> str:
     return f"'{cell}" if cell[:1] in ("=", "+", "-", "@", "\t", "\r") else cell
 
 
+SARIF_LEVEL = {"critical": "error", "high": "error", "medium": "warning",
+               "low": "note", "info": "note"}
+# GitHub code scanning buckets alerts by this 0-10 score.
+SARIF_SCORE = {"critical": "9.5", "high": "8.0", "medium": "5.5", "low": "3.0", "info": "0.0"}
+
+
+def sarif_log(target: Target, findings: list[Finding]) -> dict:
+    """Findings as a SARIF 2.1.0 log, the format code-scanning dashboards ingest."""
+    rules = {finding.id: finding for finding in findings}   # one severity per rule per target
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "RedScan",
+                "version": __version__,
+                "informationUri": "https://github.com/gavingimmestad/redscan",
+                "rules": [{
+                    "id": rule.id,
+                    "shortDescription": {"text": rule.title},
+                    "help": {"text": rule.fix},
+                    "properties": {
+                        "security-severity": SARIF_SCORE[rule.severity],
+                        "tags": ["security"]
+                                + ([f"external/cwe/{rule.cwe.lower()}"] if rule.cwe else [])
+                                + ([f"attack.{rule.attack.lower()}"] if rule.attack else []),
+                    },
+                } for rule in rules.values()],
+            }},
+            "results": [{
+                "ruleId": finding.id,
+                "level": SARIF_LEVEL[finding.severity],
+                "message": {"text": f"{finding.title} on {target.ip}:{finding.port}. "
+                                    f"{finding.detail}"},
+                # A network endpoint is not a file, but code scanning wants a
+                # physical location, so the endpoint doubles as the path.
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": f"{target.ip}/tcp/{finding.port}"},
+                        "region": {"startLine": 1},
+                    },
+                    "logicalLocations": [{
+                        "fullyQualifiedName": f"{target.ip}:{finding.port}/tcp",
+                        "kind": "resource",
+                    }],
+                }],
+                "partialFingerprints": {
+                    "redscan/v1": f"{finding.id}/{target.ip}/{finding.port}"},
+            } for finding in findings],
+        }],
+    }
+
+
 def export_results(console: Console, target: Target, view: ScanView,
-                   json_path: str | None, csv_path: str | None) -> bool:
+                   json_path: str | None, csv_path: str | None,
+                   sarif_path: str | None = None,
+                   findings: list[Finding] | tuple = ()) -> bool:
     """Write results in the requested formats. Returns False if any write failed.
 
     A bad path is reported rather than raised: the scan is already done, and however
@@ -399,6 +470,7 @@ def export_results(console: Console, target: Target, view: ScanView,
             },
             "open_ports": [asdict(p) for p in sorted(view.open_ports,
                                                      key=lambda r: r.port)],
+            "findings": [asdict(f) for f in findings],
         }
         path = Path(json_path)
         try:
@@ -418,6 +490,16 @@ def export_results(console: Console, target: Target, view: ScanView,
                     writer.writerow([result.port, result.state, result.service,
                                      result.latency_ms, _spreadsheet_safe(result.banner or "")])
             notice(console, f"csv written to {path.resolve()}", "rs.good")
+        except OSError as exc:
+            notice(console, f"could not write {path}: {exc.strerror or exc}", "rs.bad")
+            ok = False
+
+    if sarif_path:
+        path = Path(sarif_path)
+        try:
+            path.write_text(json.dumps(sarif_log(target, list(findings)), indent=2),
+                            encoding="utf-8")
+            notice(console, f"sarif written to {path.resolve()}", "rs.good")
         except OSError as exc:
             notice(console, f"could not write {path}: {exc.strerror or exc}", "rs.bad")
             ok = False
@@ -544,7 +626,9 @@ def interactive(console: Console, args: argparse.Namespace) -> int:
         if ports:
             view = do_scan(console, target, ports, args.workers,
                            args.timeout, not args.no_banner)
-            export_results(console, target, view, args.json, args.csv)
+            findings = [] if args.no_audit else do_audit(console, target, view)
+            export_results(console, target, view, args.json, args.csv,
+                           args.sarif, findings)
 
         console.print(Rule(style="rs.rule"))
 
@@ -595,8 +679,15 @@ def build_parser() -> argparse.ArgumentParser:
     colour.add_argument("--list-palettes", action="store_true",
                         help="show every palette and exit")
 
+    parser.add_argument("--no-audit", action="store_true",
+                        help="skip the security audit of open ports")
+    parser.add_argument("--fail-on", metavar="SEVERITY", choices=SEVERITIES[::-1],
+                        help="exit 1 when a finding is this severe or worse: "
+                             + ", ".join(SEVERITIES[::-1]))
     parser.add_argument("--json", metavar="FILE", help="write results to JSON")
     parser.add_argument("--csv", metavar="FILE", help="write open ports to CSV")
+    parser.add_argument("--sarif", metavar="FILE",
+                        help="write findings as SARIF 2.1.0 for code scanning")
     parser.add_argument("--net-info", action="store_true",
                         help="show this machine's addresses and exit")
     parser.add_argument("-V", "--version", action="version",
@@ -608,6 +699,9 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.no_audit and (args.fail_on or args.sarif):
+        # A pipeline gate that passes because nothing was checked is worse than none.
+        parser.error("--fail-on and --sarif need the audit: drop --no-audit")
     console = build_console(resolve_palette(args))
     launched_bare = not argv
 
@@ -652,9 +746,15 @@ def main(argv: list[str] | None = None) -> int:
 
         view = do_scan(console, target, ports, args.workers, args.timeout,
                        not args.no_banner)
-        exported = export_results(console, target, view, args.json, args.csv)
+        findings = [] if args.no_audit else do_audit(console, target, view)
+        exported = export_results(console, target, view, args.json, args.csv,
+                                  args.sarif, findings)
         if view.done < view.total:
             return 130
+        if args.fail_on and any(SEVERITIES.index(f.severity) >= SEVERITIES.index(args.fail_on)
+                                for f in findings):
+            notice(console, f"findings at {args.fail_on} or above: exiting 1", "rs.bad")
+            return 1
         return 0 if exported else 1
     except KeyboardInterrupt:
         notice(console, "aborted", "rs.warn")

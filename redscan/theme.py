@@ -311,6 +311,12 @@ def build_theme(palette: Palette | None = None) -> Theme:
             "rs.rule": strong,
             "rs.key": f"bold {bright}",
             "rs.warn": f"bold {bright}",
+            # Severity runs the same way as everything else here: hotter is worse.
+            "rs.sev.critical": f"bold #FFFFFF on {core}",
+            "rs.sev.high": f"bold {void} on {hot}",
+            "rs.sev.medium": f"bold {bright}",
+            "rs.sev.low": strong,
+            "rs.sev.info": blend(deep, glow, 0.4),
         }
     )
 

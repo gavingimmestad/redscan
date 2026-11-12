@@ -10,6 +10,7 @@ it all sits still, exactly as it did in 1.0.
 from __future__ import annotations
 
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 
 from rich import box
@@ -32,6 +33,7 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
+from .audit import SEVERITIES, Finding
 from .banner import sweep_bar
 from .net import PingStats, Pong, PortResult, Target, guess_os
 from .theme import (
@@ -448,6 +450,72 @@ def scan_summary(target: Target, view: ScanView) -> RenderableType:
         ])
     return frame(Group(*pieces), "SCAN COMPLETE" if finished else "SCAN INTERRUPTED",
                  box_style=box.DOUBLE, padding=(1, 2))
+
+
+def tls_table(results: list[PortResult]) -> Table:
+    """What each TLS port negotiated and which certificate it presented."""
+    table = Table(box=box.SIMPLE_HEAD, border_style="rs.border.dim",
+                  header_style=f"bold {role('strong')}", expand=True, pad_edge=False)
+    table.add_column("PORT", justify="right", style="rs.value", width=6, no_wrap=True)
+    table.add_column("PROTOCOL", ratio=3, no_wrap=True, overflow="ellipsis")
+    table.add_column("CERTIFICATE", ratio=3, no_wrap=True, overflow="ellipsis")
+    table.add_column("EXPIRES", width=12, no_wrap=True)
+    table.add_column("TRUST", ratio=2)
+    for result in sorted(results, key=lambda r: r.port):
+        tls = result.tls
+        protocol = Text(tls["version"], style="rs.value")
+        if tls["legacy"] and tls["legacy"] != tls["version"]:
+            protocol.append(f" + {tls['legacy']}", style="rs.sev.medium")
+        protocol.append(f"\n{tls['cipher']}", style="rs.muted")
+        # Text, not str: certificate names are remote input, same as banners.
+        cert = Text(tls["subject"] or "—", style="rs.value")
+        cert.append(f"\nby {tls['issuer'] or 'unknown'}", style="rs.muted")
+        days = tls["days_left"]
+        expires = Text(tls["expires"] or "—", style="rs.value")
+        if days is not None:
+            expires.append("\nexpired" if days < 0 else f"\n{days:,} days",
+                           style="rs.bad" if days < 0 else "rs.muted")
+        trust = (Text("trusted", style="rs.good") if tls["trusted"]
+                 else Text(tls["trust_error"], style="rs.bad"))
+        table.add_row(str(result.port), protocol, cert, expires, trust)
+    return table
+
+
+def findings_table(findings: list[Finding]) -> Table:
+    """One row per finding: what, why, the fix and where it sits in ATT&CK / CWE."""
+    table = Table(box=box.SIMPLE_HEAD, border_style="rs.border.dim",
+                  header_style=f"bold {role('strong')}", expand=True, pad_edge=False, leading=1)
+    table.add_column("SEVERITY", width=10, no_wrap=True)
+    table.add_column("PORT", justify="right", style="rs.value", width=6, no_wrap=True)
+    table.add_column("FINDING", ratio=1)
+    table.add_column("ATT&CK / CWE", width=12, no_wrap=True)
+    for finding in findings:
+        body = Text.assemble(
+            (finding.title, "rs.value"),
+            (f"\n{finding.detail}", "rs.muted"),
+            (f"\n▸ {finding.fix}", "rs.label"),
+        )
+        refs = "\n".join(ref for ref in (finding.attack, finding.cwe) if ref)
+        table.add_row(
+            Text(f" {finding.severity.upper()} ", style=f"rs.sev.{finding.severity}"),
+            str(finding.port), body, Text(refs or "—", style="rs.hot"))
+    return table
+
+
+def audit_panel(results: list[PortResult], findings: list[Finding]) -> RenderableType:
+    """The security verdict: severity tally, TLS details, then every finding."""
+    counts = Counter(finding.severity for finding in findings)
+    verdict = Text("   ").join(
+        Text(f" {counts[level]} {level.upper()} ", style=f"rs.sev.{level}")
+        for level in reversed(SEVERITIES) if counts[level]
+    ) if findings else Text("NO FINDINGS - nothing here trips a rule", style="rs.muted")
+    pieces: list[RenderableType] = [Align.center(verdict)]
+    with_tls = [result for result in results if result.tls]
+    if with_tls:
+        pieces.extend([Rule(style="rs.rule"), tls_table(with_tls)])
+    if findings:
+        pieces.extend([Rule(style="rs.rule"), findings_table(findings)])
+    return frame(Group(*pieces), "SECURITY AUDIT", box_style=box.DOUBLE, padding=(1, 2))
 
 
 def ping_summary(target: Target, stats: PingStats, history: list[Pong]) -> RenderableType:

@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import contextlib
+import email
+import functools
 import ipaddress
+import os
 import platform
 import re
 import socket
+import ssl
 import struct
 import subprocess
+import tempfile
 import threading
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import Iterable, Iterator
 
@@ -56,6 +64,11 @@ SERVICES: dict[int, str] = {
 HTTP_PORTS = {80, 81, 443, 591, 2082, 2083, 2086, 3000, 5000, 5601, 8000,
               8008, 8080, 8081, 8086, 8088, 8123, 8443, 8888, 9000, 9090,
               9200, 10000, 15672, 32400}
+
+# Ports that expect a TLS hello straight away (no STARTTLS dance first).
+TLS_PORTS = {465, 636, 853, 990, 992, 993, 995, 2376, 3269, 5061, 5671, 5986,
+             6443, 6697, 8883, 9443}
+LEGACY_TLS = ("SSLv3", "TLSv1", "TLSv1.1")
 
 
 def service_name(port: int) -> str:
@@ -307,6 +320,8 @@ class PortResult:
     service: str
     latency_ms: float | None = None
     banner: str | None = None
+    tls: dict | None = None     # filled in by inspect_ports
+    http: dict | None = None    # filled in by inspect_ports
 
     @property
     def is_open(self) -> bool:
@@ -424,6 +439,181 @@ def scan_ports(ip: str, ports: Iterable[int], workers: int = 400,
         # Abandoned early, drop the queue. Waiting for it here is what used to leave
         # Ctrl+C sitting for minutes on a full sweep, finishing the scan it was stopping.
         pool.shutdown(wait=False, cancel_futures=True)
+
+
+# --- Service inspection -------------------------------------------------------
+#
+# Scanning only connects and listens. This part talks, so it sticks to ports
+# where a TLS hello or an HTTP request is what the service expects: a raw print
+# server on 9100 would put our handshake on paper.
+
+def _clean(text: str, limit: int = 96) -> str:
+    """Remote text made safe to print: no control characters, one line, bounded."""
+    return " ".join(_BANNER_STRIP.sub("", text).split())[:limit]
+
+
+@functools.cache
+def _tls_context(kind: str) -> ssl.SSLContext:
+    """A client context that will talk to anything, however old.
+
+    ``any`` and ``legacy`` only observe; ``trust`` also verifies the chain and
+    ``name`` the hostname on top of that.
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.set_ciphers("DEFAULT:@SECLEVEL=0")   # OpenSSL 3 refuses TLS 1.0/1.1 above level 0
+    with warnings.catch_warnings():          # Python deprecates the versions we came to find
+        warnings.simplefilter("ignore", DeprecationWarning)
+        ctx.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+        if kind == "legacy":
+            ctx.maximum_version = ssl.TLSVersion.TLSv1_1
+    ctx.check_hostname = kind == "name"
+    if kind in ("trust", "name"):
+        ctx.load_default_certs()
+    else:
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _tls_connect(ip: str, port: int, kind: str, hostname: str | None,
+                 timeout: float) -> ssl.SSLSocket:
+    """Connect and handshake. The timeout bounds each step, not each packet."""
+    context = _tls_context(kind)             # before the socket: a failure here leaks nothing
+    return context.wrap_socket(socket.create_connection((ip, port), timeout=timeout),
+                               server_hostname=hostname)
+
+
+def _decode_cert(der: bytes) -> dict:
+    """Parse a DER certificate with the interpreter's own OpenSSL."""
+    # shortcut: ssl._ssl._test_decode_cert is private CPython API and only reads
+    # files; switch to the `cryptography` package if a future Python drops it.
+    fd, path = tempfile.mkstemp(suffix=".pem")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(ssl.DER_cert_to_PEM_cert(der))
+        return ssl._ssl._test_decode_cert(path)
+    except Exception:                        # no decoder or a mangled cert: carry on without
+        return {}
+    finally:
+        os.unlink(path)
+
+
+def _cert_name(rdns: tuple | None, *prefer: str) -> str | None:
+    """The first of the ``prefer`` attributes present in an X.509 name."""
+    fields = {key: value for rdn in rdns or () for key, value in rdn}
+    name = next((fields[key] for key in prefer if fields.get(key)), None)
+    return _clean(name) if name else None
+
+
+def _tls_facts(tls: ssl.SSLSocket) -> dict:
+    """Protocol, cipher and certificate details from a completed handshake."""
+    version = tls.version()
+    cipher, _, bits = tls.cipher()
+    # The parsed certificate is only handed over after a verified handshake.
+    cert = tls.getpeercert() or _decode_cert(tls.getpeercert(True) or b"")
+    facts = {
+        "version": version,
+        "cipher": cipher,
+        "bits": bits,
+        # Newer certificates carry no common name at all, only alternative names.
+        "subject": (_cert_name(cert.get("subject"), "commonName", "organizationName")
+                    or next((_clean(v) for _, v in cert.get("subjectAltName", ())), None)),
+        "issuer": _cert_name(cert.get("issuer"), "organizationName", "commonName"),
+        "expires": None,
+        "days_left": None,
+        "trusted": True,        # inspect_port overrules this when verification fails
+        "trust_error": None,
+        "verify_code": None,    # OpenSSL X509_V_ERR_* number behind trust_error
+        "legacy": version if version in LEGACY_TLS else None,
+    }
+    with contextlib.suppress(KeyError, ValueError, OverflowError):
+        expires = ssl.cert_time_to_seconds(cert["notAfter"])
+        # Not time.gmtime: Windows gives up on dates past the year 3000.
+        facts["expires"] = (datetime(1970, 1, 1) + timedelta(seconds=expires)).date().isoformat()
+        facts["days_left"] = int((expires - time.time()) // 86400)
+    return facts
+
+
+_HTTP_KEPT = ("server", "x-powered-by", "location", "strict-transport-security",
+              "content-security-policy", "x-content-type-options", "x-frame-options")
+
+
+def http_probe(sock: socket.socket, host: str, timeout: float = 3.0) -> dict | None:
+    """``HEAD /`` on a connected socket: the status and the headers worth judging."""
+    deadline = time.monotonic() + timeout
+    raw = b""
+    try:
+        sock.sendall(f"HEAD / HTTP/1.1\r\nHost: {host}\r\nUser-Agent: RedScan\r\n"
+                     "Accept: */*\r\nConnection: close\r\n\r\n".encode("ascii", "replace"))
+        # Stop at the end of the headers, 16 KB, the deadline or the first byte
+        # that is not HTTP - whichever a slow or chatty server reaches first.
+        while (b"\r\n\r\n" not in raw and len(raw) < 16384
+               and b"HTTP/".startswith(raw[:5]) and time.monotonic() < deadline):
+            sock.settimeout(max(deadline - time.monotonic(), 0.01))
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            raw += chunk
+    except OSError:
+        pass                                 # judge whatever arrived before it went wrong
+    head = raw.partition(b"\r\n\r\n")[0].decode("latin-1")
+    status = re.match(r"HTTP/\d\.\d (\d{3})", head)
+    if not status:
+        return None
+    headers = email.message_from_string(head.partition("\r\n")[2])
+    return {
+        "status": int(status[1]),
+        "headers": {name: _clean(headers[name], 200) for name in _HTTP_KEPT if headers[name]},
+    }
+
+
+def inspect_port(ip: str, result: PortResult, hostname: str | None = None,
+                 timeout: float = 3.0) -> None:
+    """Fill in ``result.tls`` and ``result.http`` for one open port."""
+    host = hostname or ip
+    verdict: dict = {}
+    # Handshake the way a careful client would. Only when the certificate fails
+    # that do we come back without verification to see what was presented.
+    for kind in ("name" if hostname else "trust", "any"):
+        try:
+            with _tls_connect(ip, result.port, kind, hostname, timeout) as tls:
+                result.tls = _tls_facts(tls) | verdict
+                result.http = http_probe(tls, host, timeout)
+            break
+        except ssl.SSLCertVerificationError as exc:
+            verdict = {"trusted": False, "trust_error": exc.verify_message,
+                       "verify_code": exc.verify_code}
+        except (OSError, ValueError):        # no TLS here; it may still be plain HTTP
+            if not verdict and (result.port in HTTP_PORTS
+                                or (result.banner or "").startswith("HTTP/")):
+                with contextlib.suppress(OSError):
+                    with socket.create_connection((ip, result.port), timeout=timeout) as sock:
+                        result.http = http_probe(sock, host, timeout)
+            return
+
+    # And does it still shake hands when offered nothing newer than TLS 1.1?
+    if result.tls and not result.tls["legacy"]:
+        with contextlib.suppress(OSError, ValueError):
+            with _tls_connect(ip, result.port, "legacy", hostname, timeout) as old:
+                result.tls["legacy"] = old.version()
+
+
+def inspect_ports(target: Target, results: Iterable[PortResult],
+                  timeout: float = 3.0) -> None:
+    """Inspect, concurrently, every open port we know how to talk to."""
+    speakable = [r for r in results if r.is_open and (
+        r.port in HTTP_PORTS or r.port in TLS_PORTS
+        or (r.banner or "").startswith("HTTP/"))]
+    if not speakable:
+        return
+    with contextlib.suppress(ValueError):    # warm the cache here: catch_warnings is not thread-safe
+        for kind in ("any", "trust", "name", "legacy"):
+            _tls_context(kind)
+    with ThreadPoolExecutor(max_workers=min(16, len(speakable))) as pool:
+        try:
+            list(pool.map(lambda r: inspect_port(target.ip, r, target.hostname, timeout),
+                          speakable))
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
 
 def parse_ports(spec: str) -> list[int]:
